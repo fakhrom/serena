@@ -92,6 +92,9 @@ class BannerRotation {
     }
 
     loadBanners(onSuccess) {
+        // Disabled: no external internet calls. Banners are cosmetic.
+        if (onSuccess) onSuccess();
+        return;
         $.ajax({
             url: 'https://oraios-software.de/serena-banners/manifest.php',
             type: 'GET',
