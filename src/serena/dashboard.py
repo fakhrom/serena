@@ -5,7 +5,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from flask import Flask, Response, request, send_from_directory
+from flask import Flask, Response, send_from_directory
+from flask_socketio import SocketIO, emit
 from pydantic import BaseModel
 from sensai.util import logging
 
@@ -140,8 +141,13 @@ class SerenaDashboardAPI:
         self._agent = agent
         self._shutdown_callback = shutdown_callback
         self._app = Flask(__name__)
+        self._socketio = SocketIO(self._app, async_mode="threading", cors_allowed_origins="*")
         self._tool_usage_stats = tool_usage_stats
         self._setup_routes()
+        self._setup_socket_events()
+
+        # register log emit callback to push log messages via WebSocket
+        self._memory_log_handler.add_emit_callback(self._on_log_message)
 
     @property
     def memory_log_handler(self) -> MemoryLogHandler:
