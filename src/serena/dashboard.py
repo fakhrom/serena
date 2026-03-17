@@ -1,3 +1,14 @@
+"""Serena Dashboard API — WebSocket real-time updates via flask-socketio.
+
+All dashboard data flows through one bidirectional WebSocket connection:
+- Server→Client: task lifecycle, log messages, tool stats, config changes
+- Client→Server: memory operations, task cancellation, config changes
+
+REST endpoints kept only for: static files, heartbeat, and backward compatibility
+with external consumers (serena_session.py HTTP bridge).
+"""
+
+import json
 import os
 import socket
 import threading
@@ -5,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from flask import Flask, Response, send_from_directory
+from flask import Flask, Response, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from pydantic import BaseModel
 from sensai.util import logging
@@ -146,14 +157,192 @@ class SerenaDashboardAPI:
         self._setup_routes()
         self._setup_socket_events()
 
-        # register log emit callback to push log messages via WebSocket
+        # Register callbacks for real-time push
         self._memory_log_handler.add_emit_callback(self._on_log_message)
 
     @property
     def memory_log_handler(self) -> MemoryLogHandler:
         return self._memory_log_handler
 
+    @property
+    def socketio(self) -> SocketIO:
+        return self._socketio
+
+    def broadcast_event(self, event_name: str, data: dict) -> None:
+        """Broadcast an event to all connected WebSocket clients."""
+        self._socketio.emit(event_name, data)
+
+    def _on_log_message(self, message: str) -> None:
+        """Callback from MemoryLogHandler — push log message to clients."""
+        self.broadcast_event("log_message", {"message": message})
+
+    def _on_task_event(self, event_data: dict) -> None:
+        """Callback from TaskExecutor — push task lifecycle event to clients."""
+        self.broadcast_event("task_update", event_data)
+
+    def _setup_socket_events(self) -> None:
+        """Register WebSocket event handlers for bidirectional communication."""
+
+        @self._socketio.on("connect")
+        def handle_connect():
+            """On client connect, send full initial state."""
+            try:
+                # Send initial log messages
+                all_logs = self._memory_log_handler.get_log_messages(from_idx=0)
+                project = self._agent.get_active_project()
+                project_name = project.project_name if project else None
+                emit("initial_logs", {
+                    "messages": all_logs.messages,
+                    "max_idx": all_logs.max_idx,
+                    "active_project": project_name,
+                })
+
+                # Send initial tool stats
+                if self._tool_usage_stats is not None:
+                    emit("tool_stats", {"stats": self._tool_usage_stats.get_tool_stats_dict()})
+
+                # Send initial config
+                try:
+                    config = self._get_config_overview()
+                    emit("config_update", config.model_dump())
+                except Exception:
+                    pass
+
+                # Send current execution queue
+                current_tasks = self._agent.get_current_tasks()
+                executions = [QueuedExecution.from_task_info(t).model_dump() for t in current_tasks]
+                last = self._agent.get_last_executed_task()
+                last_execution = QueuedExecution.from_task_info(last).model_dump() if last else None
+                emit("execution_state", {
+                    "queued_executions": executions,
+                    "last_execution": last_execution,
+                })
+
+                # Send tool names
+                emit("tool_names", {"tool_names": self._tool_names})
+
+            except Exception as e:
+                self.log.error(f"Error sending initial state: {e}")
+
+        @self._socketio.on("save_memory")
+        def handle_save_memory(data):
+            try:
+                req = RequestSaveMemory.model_validate(data)
+                self._save_memory(req)
+                emit("action_result", {"action": "save_memory", "status": "success",
+                     "message": f"Memory {req.memory_name} saved"})
+            except Exception as e:
+                emit("action_result", {"action": "save_memory", "status": "error", "message": str(e)})
+
+        @self._socketio.on("delete_memory")
+        def handle_delete_memory(data):
+            try:
+                req = RequestDeleteMemory.model_validate(data)
+                self._delete_memory(req)
+                emit("action_result", {"action": "delete_memory", "status": "success",
+                     "message": f"Memory {req.memory_name} deleted"})
+            except Exception as e:
+                emit("action_result", {"action": "delete_memory", "status": "error", "message": str(e)})
+
+        @self._socketio.on("rename_memory")
+        def handle_rename_memory(data):
+            try:
+                req = RequestRenameMemory.model_validate(data)
+                result = self._rename_memory(req)
+                emit("action_result", {"action": "rename_memory", "status": "success", "message": result})
+            except Exception as e:
+                emit("action_result", {"action": "rename_memory", "status": "error", "message": str(e)})
+
+        @self._socketio.on("get_memory")
+        def handle_get_memory(data):
+            try:
+                req = RequestGetMemory.model_validate(data)
+                result = self._get_memory(req)
+                emit("memory_content", result.model_dump())
+            except Exception as e:
+                emit("action_result", {"action": "get_memory", "status": "error", "message": str(e)})
+
+        @self._socketio.on("cancel_task")
+        def handle_cancel_task(data):
+            try:
+                task_id = data.get("task_id")
+                for task in self._agent.get_current_tasks():
+                    if task.task_id == task_id:
+                        task.cancel()
+                        emit("action_result", {"action": "cancel_task", "status": "success", "was_cancelled": True})
+                        return
+                emit("action_result", {"action": "cancel_task", "status": "success", "was_cancelled": False,
+                     "message": f"Task {task_id} not found"})
+            except Exception as e:
+                emit("action_result", {"action": "cancel_task", "status": "error", "message": str(e)})
+
+        @self._socketio.on("save_config")
+        def handle_save_config(data):
+            try:
+                req = RequestSaveSerenaConfig.model_validate(data)
+                self._save_serena_config(req)
+                emit("action_result", {"action": "save_config", "status": "success"})
+            except Exception as e:
+                emit("action_result", {"action": "save_config", "status": "error", "message": str(e)})
+
+        @self._socketio.on("add_language")
+        def handle_add_language(data):
+            try:
+                req = RequestAddLanguage.model_validate(data)
+                self._add_language(req)
+                emit("action_result", {"action": "add_language", "status": "success",
+                     "message": f"Language {req.language} added"})
+            except Exception as e:
+                emit("action_result", {"action": "add_language", "status": "error", "message": str(e)})
+
+        @self._socketio.on("remove_language")
+        def handle_remove_language(data):
+            try:
+                req = RequestRemoveLanguage.model_validate(data)
+                self._remove_language(req)
+                emit("action_result", {"action": "remove_language", "status": "success",
+                     "message": f"Language {req.language} removed"})
+            except Exception as e:
+                emit("action_result", {"action": "remove_language", "status": "error", "message": str(e)})
+
+        @self._socketio.on("clear_logs")
+        def handle_clear_logs():
+            self._memory_log_handler.clear_log_messages()
+            emit("action_result", {"action": "clear_logs", "status": "success"})
+
+        @self._socketio.on("clear_tool_stats")
+        def handle_clear_tool_stats():
+            self._clear_tool_stats()
+            emit("action_result", {"action": "clear_tool_stats", "status": "success"})
+
+        @self._socketio.on("request_config")
+        def handle_request_config():
+            """Client requests fresh config (e.g., on tab switch)."""
+            try:
+                config = self._get_config_overview()
+                emit("config_update", config.model_dump())
+            except Exception as e:
+                emit("action_result", {"action": "request_config", "status": "error", "message": str(e)})
+
+        @self._socketio.on("request_tool_stats")
+        def handle_request_tool_stats():
+            """Client requests fresh tool stats."""
+            if self._tool_usage_stats is not None:
+                emit("tool_stats", {"stats": self._tool_usage_stats.get_tool_stats_dict()})
+
+        @self._socketio.on("mark_news_read")
+        def handle_mark_news_read(data):
+            try:
+                news_snippet_id = int(data.get("news_snippet_id"))
+                news_snippet_id_file = SerenaPaths().news_snippet_id_file
+                with open(news_snippet_id_file, "w", encoding="utf-8") as f:
+                    f.write(str(news_snippet_id))
+                emit("action_result", {"action": "mark_news_read", "status": "success"})
+            except Exception as e:
+                emit("action_result", {"action": "mark_news_read", "status": "error", "message": str(e)})
+
     def _setup_routes(self) -> None:
+        """HTTP routes — static files, heartbeat, and backward-compatible REST endpoints."""
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
@@ -163,12 +352,11 @@ class SerenaDashboardAPI:
         def serve_dashboard_index() -> Response:
             return send_from_directory(SERENA_DASHBOARD_DIR, "index.html")
 
-        # API routes
-
         @self._app.route("/heartbeat", methods=["GET"])
         def get_heartbeat() -> dict[str, Any]:
             return {"status": "alive"}
 
+        # REST endpoints kept for backward compatibility (serena_session.py HTTP bridge)
         @self._app.route("/get_log_messages", methods=["POST"])
         def get_log_messages() -> dict[str, Any]:
             request_data = request.get_json()
@@ -176,19 +364,16 @@ class SerenaDashboardAPI:
                 request_log = RequestLog()
             else:
                 request_log = RequestLog.model_validate(request_data)
-
             result = self._get_log_messages(request_log)
             return result.model_dump()
 
         @self._app.route("/get_tool_names", methods=["GET"])
         def get_tool_names() -> dict[str, Any]:
-            result = self._get_tool_names()
-            return result.model_dump()
+            return ResponseToolNames(tool_names=self._tool_names).model_dump()
 
         @self._app.route("/get_tool_stats", methods=["GET"])
         def get_tool_stats_route() -> dict[str, Any]:
-            result = self._get_tool_stats()
-            return result.model_dump()
+            return self._get_tool_stats().model_dump()
 
         @self._app.route("/clear_tool_stats", methods=["POST"])
         def clear_tool_stats_route() -> dict[str, str]:
@@ -217,18 +402,16 @@ class SerenaDashboardAPI:
 
         @self._app.route("/get_available_languages", methods=["GET"])
         def get_available_languages() -> dict[str, Any]:
-            result = self._get_available_languages()
-            return result.model_dump()
+            return self._get_available_languages().model_dump()
 
         @self._app.route("/add_language", methods=["POST"])
         def add_language() -> dict[str, str]:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_add_language = RequestAddLanguage.model_validate(request_data)
             try:
-                self._add_language(request_add_language)
-                return {"status": "success", "message": f"Language {request_add_language.language} added successfully"}
+                self._add_language(RequestAddLanguage.model_validate(request_data))
+                return {"status": "success", "message": "Language added"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
@@ -237,10 +420,9 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_remove_language = RequestRemoveLanguage.model_validate(request_data)
             try:
-                self._remove_language(request_remove_language)
-                return {"status": "success", "message": f"Language {request_remove_language.language} removed successfully"}
+                self._remove_language(RequestRemoveLanguage.model_validate(request_data))
+                return {"status": "success", "message": "Language removed"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
@@ -249,9 +431,8 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_get_memory = RequestGetMemory.model_validate(request_data)
             try:
-                result = self._get_memory(request_get_memory)
+                result = self._get_memory(RequestGetMemory.model_validate(request_data))
                 return result.model_dump()
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -261,10 +442,9 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_save_memory = RequestSaveMemory.model_validate(request_data)
             try:
-                self._save_memory(request_save_memory)
-                return {"status": "success", "message": f"Memory {request_save_memory.memory_name} saved successfully"}
+                self._save_memory(RequestSaveMemory.model_validate(request_data))
+                return {"status": "success", "message": "Memory saved"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
@@ -273,10 +453,9 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_delete_memory = RequestDeleteMemory.model_validate(request_data)
             try:
-                self._delete_memory(request_delete_memory)
-                return {"status": "success", "message": f"Memory {request_delete_memory.memory_name} deleted successfully"}
+                self._delete_memory(RequestDeleteMemory.model_validate(request_data))
+                return {"status": "success", "message": "Memory deleted"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
@@ -285,18 +464,16 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_rename_memory = RequestRenameMemory.model_validate(request_data)
             try:
-                result_message = self._rename_memory(request_rename_memory)
-                return {"status": "success", "message": result_message}
+                result = self._rename_memory(RequestRenameMemory.model_validate(request_data))
+                return {"status": "success", "message": result}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
         @self._app.route("/get_serena_config", methods=["GET"])
         def get_serena_config() -> dict[str, Any]:
             try:
-                result = self._get_serena_config()
-                return result.model_dump()
+                return self._get_serena_config().model_dump()
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
@@ -305,18 +482,17 @@ class SerenaDashboardAPI:
             request_data = request.get_json()
             if not request_data:
                 return {"status": "error", "message": "No data provided"}
-            request_save_config = RequestSaveSerenaConfig.model_validate(request_data)
             try:
-                self._save_serena_config(request_save_config)
-                return {"status": "success", "message": "Serena config saved successfully"}
+                self._save_serena_config(RequestSaveSerenaConfig.model_validate(request_data))
+                return {"status": "success", "message": "Config saved"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
         @self._app.route("/queued_task_executions", methods=["GET"])
         def get_queued_executions() -> dict[str, Any]:
             try:
-                current_executions = self._agent.get_current_tasks()
-                response = [QueuedExecution.from_task_info(task_info).model_dump() for task_info in current_executions]
+                current = self._agent.get_current_tasks()
+                response = [QueuedExecution.from_task_info(t).model_dump() for t in current]
                 return {"queued_executions": response, "status": "success"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -325,56 +501,41 @@ class SerenaDashboardAPI:
         def cancel_task_execution() -> dict[str, Any]:
             request_data = request.get_json()
             try:
-                request_cancel_task = RequestCancelTaskExecution.model_validate(request_data)
+                req = RequestCancelTaskExecution.model_validate(request_data)
                 for task in self._agent.get_current_tasks():
-                    if task.task_id == request_cancel_task.task_id:
+                    if task.task_id == req.task_id:
                         task.cancel()
                         return {"status": "success", "was_cancelled": True}
-                return {
-                    "status": "success",
-                    "was_cancelled": False,
-                    "message": f"Task with id {request_data.get('task_id')} not found, maybe execution was already finished",
-                }
+                return {"status": "success", "was_cancelled": False, "message": "Task not found"}
             except Exception as e:
                 return {"status": "error", "message": str(e), "was_cancelled": False}
 
         @self._app.route("/last_execution", methods=["GET"])
         def get_last_execution() -> dict[str, Any]:
             try:
-                last_execution_info = self._agent.get_last_executed_task()
-                response = QueuedExecution.from_task_info(last_execution_info).model_dump() if last_execution_info is not None else None
+                last = self._agent.get_last_executed_task()
+                response = QueuedExecution.from_task_info(last).model_dump() if last else None
                 return {"last_execution": response, "status": "success"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
         @self._app.route("/news_snippet_ids", methods=["GET"])
         def get_news_snippet_ids() -> dict[str, str | list[int]]:
-            def _get_unread_news_ids() -> list[int]:
+            try:
                 all_news_files = (Path(SERENA_DASHBOARD_DIR) / "news").glob("*.html")
                 all_news_ids = [int(f.stem) for f in all_news_files]
-                """News ids are ints of format YYYYMMDD (publication dates)"""
-
-                # Filter news items by installation date
-                serena_config_creation_date = SerenaConfig.get_config_file_creation_date()
-                if serena_config_creation_date is None:
-                    # should not normally happen, since config file should exist when the dashboard is started
-                    # We assume a fresh installation in this case
-                    log.error("Serena config file not found when starting the dashboard")
-                    return []
-                serena_config_creation_date_int = int(serena_config_creation_date.strftime("%Y%m%d"))
-                # Only include news items published on or after the installation date
-                post_installation_news_ids = [news_id for news_id in all_news_ids if news_id >= serena_config_creation_date_int]
-
-                news_snippet_id_file = SerenaPaths().news_snippet_id_file
-                if not os.path.exists(news_snippet_id_file):
-                    return post_installation_news_ids
-                with open(news_snippet_id_file, encoding="utf-8") as f:
-                    last_read_news_id = int(f.read().strip())
-                return [news_id for news_id in post_installation_news_ids if news_id > last_read_news_id]
-
-            try:
-                unread_news_ids = _get_unread_news_ids()
-                return {"news_snippet_ids": unread_news_ids, "status": "success"}
+                config_date = SerenaConfig.get_config_file_creation_date()
+                if config_date is None:
+                    return {"news_snippet_ids": [], "status": "success"}
+                config_date_int = int(config_date.strftime("%Y%m%d"))
+                post_install = [nid for nid in all_news_ids if nid >= config_date_int]
+                news_file = SerenaPaths().news_snippet_id_file
+                if not os.path.exists(news_file):
+                    return {"news_snippet_ids": post_install, "status": "success"}
+                with open(news_file, encoding="utf-8") as f:
+                    last_read = int(f.read().strip())
+                unread = [nid for nid in post_install if nid > last_read]
+                return {"news_snippet_ids": unread, "status": "success"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
@@ -382,13 +543,15 @@ class SerenaDashboardAPI:
         def mark_news_snippet_as_read() -> dict[str, str]:
             try:
                 request_data = request.get_json()
-                news_snippet_id = int(request_data.get("news_snippet_id"))
-                news_snippet_id_file = SerenaPaths().news_snippet_id_file
-                with open(news_snippet_id_file, "w", encoding="utf-8") as f:
-                    f.write(str(news_snippet_id))
-                return {"status": "success", "message": f"Marked news snippet {news_snippet_id} as read"}
+                news_id = int(request_data.get("news_snippet_id"))
+                news_file = SerenaPaths().news_snippet_id_file
+                with open(news_file, "w", encoding="utf-8") as f:
+                    f.write(str(news_id))
+                return {"status": "success"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
+
+    # --- Internal helper methods ---
 
     def _get_log_messages(self, request_log: RequestLog) -> ResponseLog:
         messages = self._memory_log_handler.get_log_messages(from_idx=request_log.start_idx)
@@ -402,8 +565,7 @@ class SerenaDashboardAPI:
     def _get_tool_stats(self) -> ResponseToolStats:
         if self._tool_usage_stats is not None:
             return ResponseToolStats(stats=self._tool_usage_stats.get_tool_stats_dict())
-        else:
-            return ResponseToolStats(stats={})
+        return ResponseToolStats(stats={})
 
     def _clear_tool_stats(self) -> None:
         if self._tool_usage_stats is not None:
@@ -413,16 +575,14 @@ class SerenaDashboardAPI:
         from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
         from serena.tools.tools_base import Tool
 
-        # Get active project info
         project = self._agent.get_active_project()
         active_project_name = project.project_name if project else None
         project_info = {
             "name": active_project_name,
-            "language": ", ".join([l.value for l in project.project_config.languages]) if project else None,
+            "language": ", ".join([lang.value for lang in project.project_config.languages]) if project else None,
             "path": str(project.project_root) if project else None,
         }
 
-        # Get context info
         context = self._agent.get_context()
         context_info = {
             "name": context.name,
@@ -430,94 +590,56 @@ class SerenaDashboardAPI:
             "path": SerenaAgentContext.get_path(context.name, instance=context),
         }
 
-        # Get active modes
         modes = self._agent.get_active_modes()
         modes_info = [
             {"name": mode.name, "description": mode.description, "path": SerenaAgentMode.get_path(mode.name, instance=mode)}
             for mode in modes
         ]
         active_mode_names = [mode.name for mode in modes]
-
-        # Get active tools
         active_tools = self._agent.get_active_tool_names()
 
-        # Get registered projects
         registered_projects: list[dict[str, str | bool]] = []
         for proj in self._agent.serena_config.projects:
-            registered_projects.append(
-                {
-                    "name": proj.project_name,
-                    "path": str(proj.project_root),
-                    "is_active": proj.project_name == active_project_name,
-                }
-            )
+            registered_projects.append({
+                "name": proj.project_name,
+                "path": str(proj.project_root),
+                "is_active": proj.project_name == active_project_name,
+            })
 
-        # Get all available tools (excluding active ones)
         all_tool_names = sorted([tool.get_name_from_cls() for tool in self._agent._all_tools.values()])
-        available_tools: list[dict[str, str | bool]] = []
-        for tool_name in all_tool_names:
-            if tool_name not in active_tools:
-                available_tools.append(
-                    {
-                        "name": tool_name,
-                        "is_active": False,
-                    }
-                )
+        available_tools: list[dict[str, str | bool]] = [
+            {"name": name, "is_active": False} for name in all_tool_names if name not in active_tools
+        ]
 
-        # Get all available modes
         all_mode_names = SerenaAgentMode.list_registered_mode_names()
         available_modes: list[dict[str, str | bool]] = []
         for mode_name in all_mode_names:
             try:
                 mode_path = SerenaAgentMode.get_path(mode_name)
             except FileNotFoundError:
-                # Skip modes that can't be found (shouldn't happen for registered modes)
                 continue
-            available_modes.append(
-                {
-                    "name": mode_name,
-                    "is_active": mode_name in active_mode_names,
-                    "path": mode_path,
-                }
-            )
+            available_modes.append({"name": mode_name, "is_active": mode_name in active_mode_names, "path": mode_path})
 
-        # Get all available contexts
         all_context_names = SerenaAgentContext.list_registered_context_names()
         available_contexts: list[dict[str, str | bool]] = []
         for context_name in all_context_names:
             try:
                 context_path = SerenaAgentContext.get_path(context_name)
             except FileNotFoundError:
-                # Skip contexts that can't be found (shouldn't happen for registered contexts)
                 continue
-            available_contexts.append(
-                {
-                    "name": context_name,
-                    "is_active": context_name == context.name,
-                    "path": context_path,
-                }
-            )
+            available_contexts.append({"name": context_name, "is_active": context_name == context.name, "path": context_path})
 
-        # Get basic tool stats (just num_calls for overview)
         tool_stats_summary = {}
         if self._tool_usage_stats is not None:
             full_stats = self._tool_usage_stats.get_tool_stats_dict()
             tool_stats_summary = {name: {"num_calls": stats["num_times_called"]} for name, stats in full_stats.items()}
 
-        # Get available memories if ReadMemoryTool is active
         available_memories = None
         if self._agent.tool_is_active("read_memory") and project is not None:
             available_memories = project.memories_manager.list_memories().get_full_list()
 
-        # Get list of languages for the active project
-        languages = []
-        if project is not None:
-            languages = [lang.value for lang in project.project_config.languages]
-
-        # Get file encoding for the active project
-        encoding = None
-        if project is not None:
-            encoding = project.project_config.encoding
+        languages = [lang.value for lang in project.project_config.languages] if project else []
+        encoding = project.project_config.encoding if project else None
 
         return ResponseConfigOverview(
             active_project=project_info,
@@ -541,8 +663,6 @@ class SerenaDashboardAPI:
         if self._shutdown_callback:
             self._shutdown_callback()
         else:
-            # noinspection PyProtectedMember
-            # noinspection PyUnresolvedReferences
             os._exit(0)
 
     def _get_available_languages(self) -> ResponseAvailableLanguages:
@@ -550,16 +670,13 @@ class SerenaDashboardAPI:
 
         def run() -> ResponseAvailableLanguages:
             all_languages = [lang.value for lang in Language.iter_all(include_experimental=False)]
-
-            # Filter out already added languages for the active project
             project = self._agent.get_active_project()
             if project:
-                current_languages = [lang.value for lang in project.project_config.languages]
-                available_languages = [lang for lang in all_languages if lang not in current_languages]
+                current = [lang.value for lang in project.project_config.languages]
+                available = [lang for lang in all_languages if lang not in current]
             else:
-                available_languages = all_languages
-
-            return ResponseAvailableLanguages(languages=sorted(available_languages))
+                available = all_languages
+            return ResponseAvailableLanguages(languages=sorted(available))
 
         return self._agent.execute_task(run, logged=False)
 
@@ -568,7 +685,6 @@ class SerenaDashboardAPI:
             project = self._agent.get_active_project()
             if project is None:
                 raise ValueError("No active project")
-
             content = project.memories_manager.load_memory(request_get_memory.memory_name)
             return ResponseGetMemory(content=content, memory_name=request_get_memory.memory_name)
 
@@ -597,7 +713,6 @@ class SerenaDashboardAPI:
             project = self._agent.get_active_project()
             if project is None:
                 raise ValueError("No active project")
-
             return project.memories_manager.move_memory(
                 request_rename_memory.old_name, request_rename_memory.new_name, is_tool_context=False
             )
@@ -608,10 +723,8 @@ class SerenaDashboardAPI:
         config_path = self._agent.serena_config.config_file_path
         if config_path is None or not os.path.exists(config_path):
             raise ValueError("Serena config file not found")
-
         with open(config_path, encoding="utf-8") as f:
             content = f.read()
-
         return ResponseGetSerenaConfig(content=content)
 
     def _save_serena_config(self, request_save_config: RequestSaveSerenaConfig) -> None:
@@ -619,7 +732,6 @@ class SerenaDashboardAPI:
             config_path = self._agent.serena_config.config_file_path
             if config_path is None:
                 raise ValueError("Serena config file path not set")
-
             with open(config_path, "w", encoding="utf-8") as f:
                 f.write(request_save_config.content)
 
@@ -627,22 +739,12 @@ class SerenaDashboardAPI:
 
     def _add_language(self, request_add_language: RequestAddLanguage) -> None:
         from solidlsp.ls_config import Language
-
-        try:
-            language = Language(request_add_language.language)
-        except ValueError:
-            raise ValueError(f"Invalid language: {request_add_language.language}")
-        # add_language is already thread-safe
+        language = Language(request_add_language.language)
         self._agent.add_language(language)
 
     def _remove_language(self, request_remove_language: RequestRemoveLanguage) -> None:
         from solidlsp.ls_config import Language
-
-        try:
-            language = Language(request_remove_language.language)
-        except ValueError:
-            raise ValueError(f"Invalid language: {request_remove_language.language}")
-        # remove_language is already thread-safe
+        language = Language(request_remove_language.language)
         self._agent.remove_language(language)
 
     @staticmethod
@@ -655,19 +757,13 @@ class SerenaDashboardAPI:
                     return port
             except OSError:
                 port += 1
-
         raise RuntimeError(f"No free ports found starting from {start_port}")
 
     def run(self, host: str, port: int) -> int:
-        """
-        Runs the dashboard on the given host and port and returns the port number.
-        """
-        # patch flask.cli.show_server to avoid printing the server info
+        """Runs the dashboard via SocketIO (WebSocket-enabled)."""
         from flask import cli
-
         cli.show_server_banner = lambda *args, **kwargs: None
-
-        self._app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+        self._socketio.run(self._app, host=host, port=port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
         return port
 
     def run_in_thread(self, host: str) -> tuple[threading.Thread, int]:

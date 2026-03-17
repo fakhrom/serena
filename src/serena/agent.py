@@ -366,9 +366,14 @@ class SerenaAgent:
         # should be the last thing to happen in the initialization since the dashboard
         # may access various parts of the agent
         if self.serena_config.web_dashboard:
-            self._dashboard_thread, port = SerenaDashboardAPI(
+            dashboard_api = SerenaDashboardAPI(
                 get_memory_log_handler(), tool_names, agent=self, tool_usage_stats=self._tool_usage_stats
-            ).run_in_thread(host=self.serena_config.web_dashboard_listen_address)
+            )
+            # Wire TaskExecutor events to WebSocket broadcast
+            self._task_executor._event_callback = dashboard_api._on_task_event
+            self._dashboard_thread, port = dashboard_api.run_in_thread(
+                host=self.serena_config.web_dashboard_listen_address
+            )
             dashboard_host = self.serena_config.web_dashboard_listen_address
             if dashboard_host == "0.0.0.0":
                 dashboard_host = "localhost"

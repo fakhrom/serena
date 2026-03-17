@@ -483,15 +483,15 @@ class Dashboard {
             }
         });
 
-        // Initialize the application
+        // Initialize WebSocket connection
+        this.socket = io();
+        this.setupSocketListeners();
+
+        // Initialize the application — load initial state via socket
         this.loadToolNames().then(function () {
-            // Start on overview page
             self.loadNews();
-            self.loadConfigOverview();
-            self.startConfigPolling();
-            self.startExecutionsPolling();
         });
-        // Initialize heartbeat interval
+        // Keep heartbeat as lightweight HTTP health check
         setInterval(this.heartbeat.bind(this), 250);
     }
 
@@ -511,6 +511,95 @@ class Dashboard {
                     window.close();
                 }
             },
+        });
+    }
+
+    setupSocketListeners() {
+        let self = this;
+
+        this.socket.on('connect', function() {
+            console.log('WebSocket connected');
+        });
+
+        // Initial state dump on connect
+        this.socket.on('initial_logs', function(data) {
+            self.toolNames = self.toolNames || [];
+            if (data.messages && data.messages.length > 0) {
+                // Store for when logs page is opened
+                self._initialLogs = data;
+                self.currentMaxIdx = data.max_idx || 0;
+            }
+            self.updateTitle(data.active_project);
+        });
+
+        this.socket.on('tool_names', function(data) {
+            self.toolNames = data.tool_names || [];
+        });
+
+        this.socket.on('config_update', function(data) {
+            const currentJson = JSON.stringify(data);
+            if (self.lastConfigDataJson !== currentJson) {
+                self.lastConfigDataJson = currentJson;
+                self.configData = data;
+                self.jetbrainsMode = data.jetbrains_mode;
+                self.activeProjectName = data.active_project ? data.active_project.name : null;
+                if (self.currentPage === 'overview') {
+                    self.displayConfig(data);
+                    self.displayBasicStats(data.tool_stats_summary);
+                    self.displayProjects(data.registered_projects);
+                    self.displayAvailableTools(data.available_tools);
+                    self.displayAvailableModes(data.available_modes);
+                    self.displayAvailableContexts(data.available_contexts);
+                }
+            }
+        });
+
+        this.socket.on('execution_state', function(data) {
+            if (data.queued_executions) {
+                self.displayActiveExecutionsQueue(data.queued_executions);
+            }
+            if (data.last_execution) {
+                self.displayLastExecution(data.last_execution);
+            }
+        });
+
+        // Real-time task updates (replaces execution polling)
+        this.socket.on('task_update', function(data) {
+            // Refresh execution state on any task event
+            self.loadQueuedExecutions();
+            self.loadLastExecution();
+        });
+
+        // Real-time log messages (replaces log polling)
+        this.socket.on('log_message', function(data) {
+            if (self.currentPage === 'logs' && data.message) {
+                let logContainer = $('#log-container')[0];
+                let wasAtBottom = false;
+                if (logContainer && logContainer.scrollHeight > 0) {
+                    wasAtBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 10);
+                }
+                self.displayLogMessage(data.message);
+                self.currentMaxIdx = (self.currentMaxIdx || 0) + 1;
+                self.updateLogButtons(true);
+                if (wasAtBottom && logContainer) {
+                    logContainer.scrollTop = logContainer.scrollHeight;
+                }
+            }
+        });
+
+        // Real-time tool stats
+        this.socket.on('tool_stats', function(data) {
+            if (self.currentPage === 'stats' && data.stats) {
+                self.displayDetailedToolStats(data.stats);
+            }
+        });
+
+        this.socket.on('action_result', function(data) {
+            console.log('Action result:', data.action, data.status, data.message || '');
+        });
+
+        this.socket.on('disconnect', function() {
+            console.log('WebSocket disconnected');
         });
     }
 
@@ -614,17 +703,13 @@ class Dashboard {
     }
 
     startConfigPolling() {
-        this.configPollInterval = setInterval(this.loadConfigOverview.bind(this), 1000);
+        // No-op: WebSocket pushes config_update events in real-time
     }
 
     startExecutionsPolling() {
-        // Poll every 1 second for executions (independent of config polling)
-        // This ensures stuck executions can still be cancelled even if config polling is blocked
-        this.loadExecutions()
-        this.executionsPollInterval = setInterval(() => {
-            this.loadQueuedExecutions();
-            this.loadLastExecution();
-        }, 1000);
+        // No-op: WebSocket pushes task_update events in real-time
+        // Load initial state once
+        this.loadExecutions();
     }
 
     displayConfig(config) {
@@ -1348,13 +1433,7 @@ class Dashboard {
     }
 
     startPeriodicPolling() {
-        // Clear any existing interval
-        if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-        }
-
-        // Start polling every second (1000ms)
-        this.pollInterval = setInterval(this.pollForNewLogs.bind(this), 1000);
+        // No-op: WebSocket pushes log_message events in real-time
     }
 
     // ===== Stats Methods =====
