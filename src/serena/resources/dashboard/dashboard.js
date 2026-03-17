@@ -491,8 +491,7 @@ class Dashboard {
         this.loadToolNames().then(function () {
             self.loadNews();
         });
-        // Keep heartbeat as lightweight HTTP health check
-        setInterval(this.heartbeat.bind(this), 250);
+        // WebSocket connection IS the heartbeat — no HTTP polling needed
     }
 
     heartbeat() {
@@ -599,7 +598,8 @@ class Dashboard {
         });
 
         this.socket.on('disconnect', function() {
-            console.log('WebSocket disconnected');
+            console.log('WebSocket disconnected — server is down, closing tab');
+            window.close();
         });
     }
 
