@@ -1,9 +1,17 @@
 import os
+import platform
+import shutil
 import subprocess
 
 from pydantic import BaseModel
 
 from solidlsp.util.subprocess_util import subprocess_kwargs
+
+# On Windows, cmd.exe (used by shell=True) cannot handle heredocs, multiline
+# commands, or bash-specific syntax. Detect bash once at import time.
+_BASH_PATH: str | None = None
+if platform.system() == "Windows":
+    _BASH_PATH = shutil.which("bash")
 
 
 class ShellCommandResult(BaseModel):
@@ -25,18 +33,32 @@ def execute_shell_command(command: str, cwd: str | None = None, capture_stderr: 
     if cwd is None:
         cwd = os.getcwd()
 
-    process = subprocess.Popen(
-        command,
-        shell=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if capture_stderr else None,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        **subprocess_kwargs(),
-    )
+    if _BASH_PATH:
+        process = subprocess.Popen(
+            [_BASH_PATH, "-c", command],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if capture_stderr else None,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            **subprocess_kwargs(),
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if capture_stderr else None,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            **subprocess_kwargs(),
+        )
 
     stdout, stderr = process.communicate()
     return ShellCommandResult(stdout=stdout, stderr=stderr, return_code=process.returncode, cwd=cwd)
