@@ -204,6 +204,10 @@ class FileUtils:
         """
         Downloads the file from the given URL to the given {target_path}
         """
+        raise SolidLSPException(
+            f"Download blocked (local-only policy): {url}. "
+            "Install the language server manually if needed."
+        )
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         try:
             response = requests.get(url, stream=True, timeout=60)

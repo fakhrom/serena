@@ -92,46 +92,8 @@ class BannerRotation {
     }
 
     loadBanners(onSuccess) {
-        // Disabled: no external internet calls. Banners are cosmetic.
+        // No external internet calls — banners disabled
         if (onSuccess) onSuccess();
-        return;
-        $.ajax({
-            url: 'https://oraios-software.de/serena-banners/manifest.php',
-            type: 'GET',
-            success: function (response) {
-                console.log('Banners loaded:', response);
-
-                function fillBanners($container, banners, className) {
-                    $.each(banners, function (index, banner) {
-                        let $img = $('<img src="' + banner.image + '" alt="' + banner.alt + '" class="banner-image">');
-                        if (banner.image_dark) {
-                            $img.addClass('theme-aware-img');
-                            $img.attr('data-src-dark', banner.image_dark);
-                            $img.attr('data-src-light', banner.image);
-                            updateThemeAwareImage($img);
-                        }
-                        let $anchor = $('<a href="' + banner.link + '" target="_blank"></a>');
-                        $anchor.append($img);
-                        let $banner = $('<div class="' + className + '-slide" data-banner="' + (index + 1) + '"></div>');
-                        $banner.append($anchor);
-                        if (index === 0) {
-                            $banner.addClass('active');
-                        }
-                        if (banner.border) {
-                            $img.addClass('banner-border');
-                        }
-                        $container.append($banner);
-                    });
-                }
-
-                fillBanners($('#gold-banners'), response.gold, 'gold-banner');
-                fillBanners($('#platinum-banners'), response.platinum, 'platinum-banner');
-                onSuccess();
-            },
-            error: function (xhr, status, error) {
-                console.error('Error loading banners:', error);
-            }
-        });
     }
 
     startPlatinumRotation() {
@@ -258,8 +220,6 @@ class Dashboard {
         this.memoryContentDirty = false;
         this.memoryToDelete = null;
         this.isAddingLanguage = false;
-        this.waitingForConfigPollingResult = false;
-        this.waitingForExecutionsPollingResult = false;
         this.originalSerenaConfigContent = null;
         this.serenaConfigContentDirty = false;
 
@@ -270,10 +230,6 @@ class Dashboard {
         // Tool names and stats
         this.toolNames = [];
         this.currentMaxIdx = -1;
-        this.pollInterval = null;
-        this.configPollInterval = null;
-        this.executionsPollInterval = null;
-        this.heartbeatFailureCount = 0;
 
         // jQuery elements
         this.$logContainer = $('#log-container');
@@ -494,26 +450,6 @@ class Dashboard {
         this.loadToolNames().then(function () {
             self.loadNews();
         });
-        // WebSocket connection IS the heartbeat — no HTTP polling needed
-    }
-
-    heartbeat() {
-        let self = this;
-        $.ajax({
-            url: '/heartbeat',
-            type: 'GET',
-            success: function (response) {
-                self.heartbeatFailureCount = 0;
-            },
-            error: function (xhr, status, error) {
-                self.heartbeatFailureCount++;
-                console.error('Heartbeat failure; count = ', self.heartbeatFailureCount);
-                if (self.heartbeatFailureCount >= 1) {
-                    console.log('Server appears to be down, closing tab');
-                    window.close();
-                }
-            },
-        });
     }
 
     setupSocketListeners() {
@@ -557,42 +493,52 @@ class Dashboard {
         });
 
         this.socket.on('execution_state', function(data) {
-            if (data.queued_executions) {
-                self.displayActiveExecutionsQueue(data.queued_executions);
-            }
-            if (data.last_execution) {
-                self.displayLastExecution(data.last_execution);
+            // Always cache latest execution state
+            self._cachedExecutionState = data;
+            // Render immediately if on overview page
+            if (self.currentPage === 'overview') {
+                self._renderExecutionState(data);
             }
         });
 
-        // Real-time task updates (replaces execution polling)
+        // Real-time task updates — server pushes execution_state after each task event
         this.socket.on('task_update', function(data) {
-            // Refresh execution state on any task event
-            self.loadQueuedExecutions();
-            self.loadLastExecution();
+            // execution_state event follows automatically from backend
         });
 
-        // Real-time log messages (replaces log polling)
+        // Real-time log messages — always buffer, render if on logs page
         this.socket.on('log_message', function(data) {
-            if (self.currentPage === 'logs' && data.message) {
-                let logContainer = $('#log-container')[0];
-                let wasAtBottom = false;
-                if (logContainer && logContainer.scrollHeight > 0) {
-                    wasAtBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 10);
+            if (data.message) {
+                // Always buffer so navigating to logs later shows all messages
+                if (!self._initialLogs) {
+                    self._initialLogs = { messages: [], max_idx: 0 };
                 }
-                self.displayLogMessage(data.message);
-                self.currentMaxIdx = (self.currentMaxIdx || 0) + 1;
-                self.updateLogButtons(true);
-                if (wasAtBottom && logContainer) {
-                    logContainer.scrollTop = logContainer.scrollHeight;
+                self._initialLogs.messages.push(data.message);
+                self._initialLogs.max_idx = (self._initialLogs.max_idx || 0) + 1;
+                self.currentMaxIdx = self._initialLogs.max_idx;
+
+                if (self.currentPage === 'logs') {
+                    let logContainer = $('#log-container')[0];
+                    let wasAtBottom = false;
+                    if (logContainer && logContainer.scrollHeight > 0) {
+                        wasAtBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 10);
+                    }
+                    self.displayLogMessage(data.message);
+                    self.updateLogButtons(true);
+                    if (wasAtBottom && logContainer) {
+                        logContainer.scrollTop = logContainer.scrollHeight;
+                    }
                 }
             }
         });
 
-        // Real-time tool stats
+        // Real-time tool stats — always cache, render if on stats page
         this.socket.on('tool_stats', function(data) {
-            if (self.currentPage === 'stats' && data.stats) {
-                self.displayDetailedToolStats(data.stats);
+            if (data.stats) {
+                self._cachedToolStats = data.stats;
+                if (self.currentPage === 'stats') {
+                    self.displayDetailedToolStats(data.stats);
+                }
             }
         });
 
@@ -627,15 +573,11 @@ class Dashboard {
         // Update current page
         this.currentPage = page;
 
-        // Stop all polling
-        this.stopPolling();
-
-        // Start appropriate polling for the page
+        // Load page data (WebSocket handles real-time updates)
         if (page === 'overview') {
             this.loadNews();
             this.loadConfigOverview();
-            this.startConfigPolling();
-            this.startExecutionsPolling();
+            this.loadExecutions();
         } else if (page === 'logs') {
             this.loadLogs();
         } else if (page === 'stats') {
@@ -643,76 +585,11 @@ class Dashboard {
         }
     }
 
-    stopPolling() {
-        if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-            this.pollInterval = null;
-        }
-        if (this.configPollInterval) {
-            clearInterval(this.configPollInterval);
-            this.configPollInterval = null;
-        }
-        if (this.executionsPollInterval) {
-            clearInterval(this.executionsPollInterval);
-            this.executionsPollInterval = null;
-        }
-    }
-
     // ===== Config Overview Methods =====
 
     loadConfigOverview() {
-        if (this.waitingForConfigPollingResult) {
-            console.log('Still waiting for previous config poll result, skipping this poll');
-            return;
-        }
-        this.waitingForConfigPollingResult = true;
-        console.log('Polling for config overview...');
-        let self = this;
-        $.ajax({
-            url: '/get_config_overview',
-            type: 'GET',
-            success: function (response) {
-                // Check if the config data has actually changed
-                const currentConfigJson = JSON.stringify(response);
-                const hasChanged = self.lastConfigDataJson !== currentConfigJson;
-
-                if (hasChanged) {
-                    console.log('Config has changed, updating display');
-                    self.lastConfigDataJson = currentConfigJson;
-                    self.configData = response;
-                    self.jetbrainsMode = response.jetbrains_mode;
-                    self.activeProjectName = response.active_project.name;
-                    self.displayConfig(response);
-                    self.displayBasicStats(response.tool_stats_summary);
-                    self.displayProjects(response.registered_projects);
-                    self.displayAvailableTools(response.available_tools);
-                    self.displayAvailableModes(response.available_modes);
-                    self.displayAvailableContexts(response.available_contexts);
-                } else {
-                    console.log('Config unchanged, skipping display update');
-                }
-            }, error: function (xhr, status, error) {
-                console.error('Error loading config overview:', error);
-                self.$configDisplay.html('<div class="error-message">Error loading configuration</div>');
-                self.$basicStatsDisplay.html('<div class="error-message">Error loading stats</div>');
-                self.$projectsDisplay.html('<div class="error-message">Error loading projects</div>');
-                self.$availableToolsDisplay.html('<div class="error-message">Error loading tools</div>');
-                self.$availableModesDisplay.html('<div class="error-message">Error loading modes</div>');
-                self.$availableContextsDisplay.html('<div class="error-message">Error loading contexts</div>');
-            }, complete: function () {
-                self.waitingForConfigPollingResult = false;
-            }
-        });
-    }
-
-    startConfigPolling() {
-        // No-op: WebSocket pushes config_update events in real-time
-    }
-
-    startExecutionsPolling() {
-        // No-op: WebSocket pushes task_update events in real-time
-        // Load initial state once
-        this.loadExecutions();
+        // Request fresh config via WebSocket — response arrives via config_update event
+        this.socket.emit('request_config');
     }
 
     displayConfig(config) {
@@ -834,10 +711,6 @@ class Dashboard {
 
             // Configuration help link and edit config button
             html += '<div style="margin-top: 15px; display: flex; gap: 10px; align-items: center;">';
-            html += '<div style="flex: 1; padding: 10px; background: var(--bg-secondary); border-radius: 4px; font-size: 13px; border: 1px solid var(--border-color);">';
-            html += '<span style="color: var(--text-muted);">📖</span> ';
-            html += '<a href="https://oraios.github.io/serena/02-usage/050_configuration.html" target="_blank" rel="noopener noreferrer" style="color: var(--btn-primary); text-decoration: none; font-weight: 500;">View Configuration Guide</a>';
-            html += '</div>';
             html += '<button id="edit-serena-config-btn" class="btn language-add-btn" style="white-space: nowrap; padding: 10px; ">Edit Global Serena Config</button>';
             html += '</div>';
 
@@ -996,52 +869,33 @@ class Dashboard {
     // ===== Executions Methods =====
 
     loadQueuedExecutions() {
-        let self = this;
-        $.ajax({
-            url: '/queued_task_executions', type: 'GET', success: function (response) {
-                if (response.status === 'success') {
-                    self.displayActiveExecutionsQueue(response.queued_executions || []);
-                } else {
-                    console.error('Error loading executions:', response.message);
-                }
-            }, error: function (xhr, status, error) {
-                console.error('Error loading executions:', error);
-                self.$activeExecutionQueueDisplay.html('<div class="error-message">Error loading executions</div>');
-            }
-        });
+        // Queued executions arrive via WebSocket 'execution_state' event on connect
     }
 
     loadLastExecution() {
-        let self = this;
-        $.ajax({
-            url: '/last_execution', type: 'GET', success: function (response) {
-                if (response.status === 'success') {
-                    if (response.last_execution !== null && response.last_execution.logged) {
-                        self.displayLastExecution(response.last_execution);
-                    }
-                } else {
-                    console.error('Error loading last execution:', response.message);
-                }
-            }, error: function (xhr, status, error) {
-                console.error('Error loading last execution:', error);
-                self.$lastExecutionDisplay.html('<div class="error-message">Error loading last execution</div>');
-            }
-        });
+        // Last execution arrives via WebSocket 'execution_state' event on connect
     }
 
     loadExecutions() {
-        if (this.waitingForExecutionsPollingResult) {
-            console.log('Still waiting for previous executions poll result, skipping this poll');
+        // Render cached state immediately, then request fresh from server
+        if (this._cachedExecutionState) {
+            this._renderExecutionState(this._cachedExecutionState);
+        }
+        this.socket.emit('request_execution_state');
+    }
+
+    _renderExecutionState(data) {
+        this.displayActiveExecutionsQueue(data.queued_executions || []);
+        if (data.last_execution) {
+            this.displayLastExecution(data.last_execution);
         } else {
-            this.waitingForExecutionsPollingResult = true;
-            console.log('Polling for executions...');
-            this.loadQueuedExecutions();
-            this.loadLastExecution();
+            this.$lastExecutionDisplay.html('<div class="no-stats-message">No executions yet.</div>');
         }
     }
 
     displayActiveExecutionsQueue(executions) {
         if (!executions || executions.length === 0) {
+            this.$activeExecutionQueueDisplay.html('<div class="no-stats-message">No queued executions.</div>');
             return;
         }
 
@@ -1187,63 +1041,8 @@ class Dashboard {
 
     cancelExecution(executionData) {
         const self = this;
-
-        console.log('cancelExecution called with full execution data:', executionData);
-        console.log('Attempting to cancel task:', executionData.task_id);
-
-        // Call backend API to cancel the task
-        $.ajax({
-            url: '/cancel_task_execution', type: 'POST', contentType: 'application/json', data: JSON.stringify({
-                task_id: executionData.task_id
-            }), success: function (response) {
-                console.log('Cancel task response:', response);
-
-                if (response.status === 'error') {
-                    console.error('Backend returned error status:', response.message);
-                    alert('Error cancelling task: ' + response.message);
-                    return;
-                }
-
-                if (response.status === 'success') {
-                    if (response.was_cancelled) {
-                        console.log('Task ' + executionData.task_id + ' was successfully cancelled');
-                        // Add to cancelled list (only managed in JS, not persisted)
-                        const alreadyCancelled = self.cancelledExecutions.some(function (exec) {
-                            return exec.task_id === executionData.task_id;
-                        });
-                        if (!alreadyCancelled) {
-                            console.log('Adding execution to cancelled list:', executionData);
-                            self.cancelledExecutions.push(executionData);
-                            console.log('Cancelled executions array now contains:', self.cancelledExecutions);
-                        } else {
-                            console.log('Execution already in cancelled list');
-                        }
-                    } else {
-                        console.log('Task ' + executionData.task_id + ' could not be cancelled (may have already completed). ' + response.message);
-                    }
-                    // Refresh display regardless
-                    self.loadQueuedExecutions();
-                } else {
-                    console.error('Unexpected response status:', response.status);
-                    alert('Unexpected response from server');
-                }
-            }, error: function (xhr, status, error) {
-                console.error('AJAX error cancelling task:');
-                console.error('  Status:', status);
-                console.error('  Error:', error);
-                console.error('  XHR:', xhr);
-                console.error('  Response:', xhr.responseText);
-
-                let errorMessage = error;
-                if (xhr.responseJSON && xhr.responseJSON.message) {
-                    errorMessage = xhr.responseJSON.message;
-                } else if (xhr.responseText) {
-                    errorMessage = xhr.responseText;
-                }
-
-                alert('Error cancelling task: ' + errorMessage);
-            }
-        });
+        console.log('Cancelling task:', executionData.task_id);
+        this.socket.emit('cancel_task', {task_id: executionData.task_id});
     }
 
     closeCancelExecutionModal() {
@@ -1268,15 +1067,8 @@ class Dashboard {
     }
 
     loadToolNames() {
-        let self = this;
-        return $.ajax({
-            url: '/get_tool_names', type: 'GET', success: function (response) {
-                self.toolNames = response.tool_names || [];
-                console.log('Loaded tool names:', self.toolNames);
-            }, error: function (xhr, status, error) {
-                console.error('Error loading tool names:', error);
-            }
-        });
+        // Tool names arrive via WebSocket 'tool_names' event on connect
+        return $.Deferred().resolve().promise();
     }
 
     updateTitle(activeProject) {
@@ -1348,122 +1140,39 @@ class Dashboard {
     }
 
     loadLogs() {
-        console.log("Loading logs");
-        let self = this;
+        // Display logs from WebSocket initial_logs event (cached on connect)
+        this.$errorContainer.empty();
+        this.$logContainer.empty();
 
-        self.$errorContainer.empty();
-
-        // Make API call
-        $.ajax({
-            url: '/get_log_messages', type: 'POST', contentType: 'application/json', data: JSON.stringify({
-                start_idx: 0
-            }), success: function (response) {
-                // Clear existing logs
-                self.$logContainer.empty();
-
-                // Update max_idx
-                self.currentMaxIdx = response.max_idx || -1;
-
-                // Display each log message
-                if (response.messages && response.messages.length > 0) {
-                    response.messages.forEach(function (message) {
-                        self.displayLogMessage(message);
-                    });
-
-                    // Auto-scroll to bottom
-                    const logContainer = $('#log-container')[0];
-                    logContainer.scrollTop = logContainer.scrollHeight;
-                } else {
-                    $('#log-container').html('<div class="loading">No log messages found.</div>');
-                }
-
-                self.updateLogButtons(response.messages && response.messages.length > 0);
-                self.updateTitle(response.active_project);
-
-                // Start periodic polling for new logs
-                self.startPeriodicPolling();
-            }, error: function (xhr, status, error) {
-                console.error('Error loading logs:', error);
-                self.$errorContainer.html('<div class="error-message">Error loading logs: ' + (xhr.responseJSON ? xhr.responseJSON.detail : error) + '</div>');
-            }
-        });
-    }
-
-    pollForNewLogs() {
-        let self = this;
-        console.log("Polling logs", this.currentMaxIdx);
-        $.ajax({
-            url: '/get_log_messages',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({
-                start_idx: self.currentMaxIdx + 1
-            }),
-            success: function (response) {
-                // Only append new messages if we have any
-                if (response.messages && response.messages.length > 0) {
-                    let wasAtBottom = false;
-                    const logContainer = $('#log-container')[0];
-
-                    // Check if user was at the bottom before adding new logs
-                    if (logContainer.scrollHeight > 0) {
-                        wasAtBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 10);
-                    }
-
-                    // Append new messages
-                    response.messages.forEach(function (message) {
-                        self.displayLogMessage(message);
-                    });
-
-                    // Update max_idx
-                    self.currentMaxIdx = response.max_idx || self.currentMaxIdx;
-
-                    self.updateLogButtons(true);
-
-                    // Auto-scroll to bottom if user was already at bottom
-                    if (wasAtBottom) {
-                        logContainer.scrollTop = logContainer.scrollHeight;
-                    }
-                } else {
-                    // Update max_idx even if no new messages
-                    self.currentMaxIdx = response.max_idx || self.currentMaxIdx;
-                }
-
-                // Update window title with active project
-                self.updateTitle(response.active_project);
-            }
-        });
-    }
-
-    startPeriodicPolling() {
-        // No-op: WebSocket pushes log_message events in real-time
+        if (this._initialLogs && this._initialLogs.messages && this._initialLogs.messages.length > 0) {
+            let self = this;
+            this._initialLogs.messages.forEach(function (message) {
+                self.displayLogMessage(message);
+            });
+            this.currentMaxIdx = this._initialLogs.max_idx || 0;
+            const logContainer = $('#log-container')[0];
+            logContainer.scrollTop = logContainer.scrollHeight;
+            this.updateLogButtons(true);
+            this.updateTitle(this._initialLogs.active_project);
+        } else {
+            $('#log-container').html('<div class="loading">No log messages found.</div>');
+            this.updateLogButtons(false);
+        }
     }
 
     // ===== Stats Methods =====
 
     loadStats() {
-        let self = this;
-        $.when($.ajax({url: '/get_tool_stats', type: 'GET'}), $.ajax({
-            url: '/get_token_count_estimator_name',
-            type: 'GET'
-        })).done(function (statsResp, estimatorResp) {
-            const stats = statsResp[0].stats;
-            const tokenCountEstimatorName = estimatorResp[0].token_count_estimator_name;
-            self.displayStats(stats, tokenCountEstimatorName);
-        }).fail(function () {
-            console.error('Error loading stats or estimator name');
-        });
+        // Render cached stats immediately, then request fresh from server
+        if (this._cachedToolStats) {
+            this.displayDetailedToolStats(this._cachedToolStats);
+        }
+        this.socket.emit('request_tool_stats');
     }
 
     clearStats() {
-        let self = this;
-        $.ajax({
-            url: '/clear_tool_stats', type: 'POST', success: function () {
-                self.loadStats();
-            }, error: function (xhr, status, error) {
-                console.error('Error clearing stats:', error);
-            }
-        });
+        // Clear stats via WebSocket — server emits updated tool_stats after clearing
+        this.socket.emit('clear_tool_stats');
     }
 
     displayStats(stats, tokenCountEstimatorName) {

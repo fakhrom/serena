@@ -204,11 +204,14 @@ class TaskExecutor:
             task_obj = self.Task(function=task, name=task_name, logged=logged, timeout=timeout)
             self._task_executor_queue.append(task_obj)
 
-            # emit task_scheduled event
-            if self._event_callback is not None:
+        # emit task_scheduled event (outside lock to avoid deadlock with socketio.emit)
+        if self._event_callback is not None:
+            try:
                 self._event_callback({"event": "task_scheduled", "name": task_name})
+            except Exception:
+                log.debug("Failed to emit task_scheduled event", exc_info=True)
 
-            return task_obj
+        return task_obj
 
     def execute_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> T:
         """

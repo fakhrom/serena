@@ -91,7 +91,14 @@ class DotNETUtil:
             log.info(f"Using cached .NET {version} runtime from {dotnet_exe}")
             return str(dotnet_exe)
 
-        # Download and run install script
+        # Block internet downloads — local-only policy
+        raise RuntimeError(
+            f".NET {version} runtime not found at {dotnet_exe}. "
+            "Automatic download is disabled (local-only policy). "
+            "Install .NET manually if C#/F# language support is needed."
+        )
+
+        # Dead code below — kept for reference if policy changes
         log.info(f"Installing .NET {version} runtime using official Microsoft install script...")
         dotnet_dir.mkdir(parents=True, exist_ok=True)
 

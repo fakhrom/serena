@@ -261,8 +261,9 @@ class SerenaAgent:
             self.serena_config.get_registered_project(project, autoregister=True) if project is not None else None
         )
 
-        # dashboard URL (set when dashboard is started)
+        # dashboard URL and API reference (set when dashboard is started)
         self._dashboard_url: str | None = None
+        self._dashboard_api: "SerenaDashboardAPI | None" = None
 
         # adjust log level
         serena_log_level = self.serena_config.log_level
@@ -369,6 +370,7 @@ class SerenaAgent:
             dashboard_api = SerenaDashboardAPI(
                 get_memory_log_handler(), tool_names, agent=self, tool_usage_stats=self._tool_usage_stats
             )
+            self._dashboard_api = dashboard_api
             # Wire TaskExecutor events to WebSocket broadcast
             self._task_executor._event_callback = dashboard_api._on_task_event
             self._dashboard_thread, port = dashboard_api.run_in_thread(
@@ -517,6 +519,10 @@ class SerenaAgent:
         output_str = str(tool_result)
         log.debug(f"Recording tool usage for tool '{tool_name}'")
         self._tool_usage_stats.record_tool_usage(tool_name, input_str, output_str)
+
+        # Push all dashboard state after every tool call
+        if self._dashboard_api is not None:
+            self._dashboard_api.broadcast_full_state()
 
     def get_dashboard_url(self) -> str | None:
         """
@@ -724,6 +730,10 @@ class SerenaAgent:
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()
+
+        # Broadcast full state to dashboard so it reflects the newly activated project
+        if self._dashboard_api is not None:
+            self._dashboard_api.broadcast_full_state()
 
     def activate_project_from_path_or_name(
         self, project_root_or_name: str, update_active_modes: bool = True, update_active_tools: bool = True

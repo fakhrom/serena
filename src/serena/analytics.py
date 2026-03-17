@@ -8,8 +8,6 @@ from copy import copy
 from dataclasses import asdict, dataclass
 from enum import Enum
 
-from anthropic.types import MessageParam, MessageTokensCount
-from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
 
@@ -25,48 +23,30 @@ class TokenCountEstimator(ABC):
 
 class TiktokenCountEstimator(TokenCountEstimator):
     """
-    Approximate token count using tiktoken.
+    Blocked — tiktoken downloads tokenizer data from the internet on first use.
+    Falls back to character-based estimation (local-only policy).
     """
 
     def __init__(self, model_name: str = "gpt-4o"):
-        """
-        The tokenizer will be downloaded on the first initialization, which may take some time.
-
-        :param model_name: see `tiktoken.model` to see available models.
-        """
-        import tiktoken
-
-        log.info(f"Loading tiktoken encoding for model {model_name}, this may take a while on the first run.")
-        self._encoding = tiktoken.encoding_for_model(model_name)
+        log.warning("TiktokenCountEstimator blocked (local-only policy). Using char-based fallback.")
+        self._fallback = CharCountEstimator()
 
     def estimate_token_count(self, text: str) -> int:
-        return len(self._encoding.encode(text))
+        return self._fallback.estimate_token_count(text)
 
 
 class AnthropicTokenCount(TokenCountEstimator):
     """
-    The exact count using the Anthropic API.
-    Counting is free, but has a rate limit and will require an API key,
-    (typically, set through an env variable).
-    See https://docs.anthropic.com/en/docs/build-with-claude/token-counting
+    Blocked — calls Anthropic API over the internet.
+    Falls back to character-based estimation (local-only policy).
     """
 
     def __init__(self, model_name: str = "claude-sonnet-4-20250514", api_key: str | None = None):
-        import anthropic
-
-        self._model_name = model_name
-        if api_key is None:
-            load_dotenv()
-        self._anthropic_client = anthropic.Anthropic(api_key=api_key)
-
-    def _send_count_tokens_request(self, text: str) -> MessageTokensCount:
-        return self._anthropic_client.messages.count_tokens(
-            model=self._model_name,
-            messages=[MessageParam(role="user", content=text)],
-        )
+        log.warning("AnthropicTokenCount blocked (local-only policy). Using char-based fallback.")
+        self._fallback = CharCountEstimator()
 
     def estimate_token_count(self, text: str) -> int:
-        return self._send_count_tokens_request(text).input_tokens
+        return self._fallback.estimate_token_count(text)
 
 
 class CharCountEstimator(TokenCountEstimator):

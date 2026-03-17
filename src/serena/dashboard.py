@@ -4,12 +4,12 @@ All dashboard data flows through one bidirectional WebSocket connection:
 - Server→Client: task lifecycle, log messages, tool stats, config changes
 - Client→Server: memory operations, task cancellation, config changes
 
-REST endpoints kept only for: static files, heartbeat, and backward compatibility
-with external consumers (serena_session.py HTTP bridge).
+REST endpoints kept for: static files, heartbeat, and the hooks HTTP bridge
+(serena_session.py uses /save_memory, /get_memory, /heartbeat).
 """
 
-import json
 import os
+import queue
 import socket
 import threading
 from collections.abc import Callable
@@ -154,6 +154,14 @@ class SerenaDashboardAPI:
         self._app = Flask(__name__)
         self._socketio = SocketIO(self._app, async_mode="threading", cors_allowed_origins="*")
         self._tool_usage_stats = tool_usage_stats
+
+        # Non-blocking event broadcast queue — socketio.emit can block on Windows
+        # when called from non-Flask threads, so we funnel all emits through a
+        # dedicated daemon thread that is the only caller of socketio.emit.
+        self._broadcast_queue: queue.Queue[tuple[str, dict]] = queue.Queue()
+        self._broadcast_thread = threading.Thread(target=self._process_broadcast_queue, daemon=True)
+        self._broadcast_thread.start()
+
         self._setup_routes()
         self._setup_socket_events()
 
@@ -169,8 +177,29 @@ class SerenaDashboardAPI:
         return self._socketio
 
     def broadcast_event(self, event_name: str, data: dict) -> None:
-        """Broadcast an event to all connected WebSocket clients."""
-        self._socketio.emit(event_name, data)
+        """Broadcast an event to all connected WebSocket clients (non-blocking).
+
+        Puts the event on a queue processed by a dedicated thread.
+        This ensures socketio.emit() never blocks the caller, which prevents
+        deadlocks with the TaskExecutor lock on Windows.
+        """
+        try:
+            self._broadcast_queue.put_nowait((event_name, data))
+        except queue.Full:
+            pass
+
+    def _process_broadcast_queue(self) -> None:
+        """Dedicated thread that drains the broadcast queue and calls socketio.emit."""
+        while True:
+            try:
+                event_name, data = self._broadcast_queue.get(timeout=1)
+                try:
+                    self._socketio.emit(event_name, data)
+                except Exception:
+                    pass
+                self._broadcast_queue.task_done()
+            except queue.Empty:
+                continue
 
     def _on_log_message(self, message: str) -> None:
         """Callback from MemoryLogHandler — push log message to clients."""
@@ -179,6 +208,37 @@ class SerenaDashboardAPI:
     def _on_task_event(self, event_data: dict) -> None:
         """Callback from TaskExecutor — push task lifecycle event to clients."""
         self.broadcast_event("task_update", event_data)
+        self._broadcast_execution_state()
+
+    def broadcast_full_state(self) -> None:
+        """Broadcast all dashboard state to connected clients.
+
+        Called after every tool call so all sections stay in sync.
+        """
+        self._broadcast_config()
+        self._broadcast_execution_state()
+
+    def _broadcast_config(self) -> None:
+        """Push config + tool stats to all clients."""
+        try:
+            config = self._get_config_overview()
+            self.broadcast_event("config_update", config.model_dump())
+        except Exception:
+            log.debug("Failed to broadcast config_update", exc_info=True)
+
+    def _broadcast_execution_state(self) -> None:
+        """Push execution queue + last execution to all clients."""
+        try:
+            current_tasks = self._agent.get_current_tasks()
+            executions = [QueuedExecution.from_task_info(t).model_dump() for t in current_tasks]
+            last = self._agent.get_last_executed_task()
+            last_execution = QueuedExecution.from_task_info(last).model_dump() if last else None
+            self.broadcast_event("execution_state", {
+                "queued_executions": executions,
+                "last_execution": last_execution,
+            })
+        except Exception:
+            log.debug("Failed to broadcast execution_state", exc_info=True)
 
     def _setup_socket_events(self) -> None:
         """Register WebSocket event handlers for bidirectional communication."""
@@ -229,6 +289,7 @@ class SerenaDashboardAPI:
             try:
                 req = RequestSaveMemory.model_validate(data)
                 self._save_memory(req)
+                self.broadcast_full_state()
                 emit("action_result", {"action": "save_memory", "status": "success",
                      "message": f"Memory {req.memory_name} saved"})
             except Exception as e:
@@ -239,6 +300,7 @@ class SerenaDashboardAPI:
             try:
                 req = RequestDeleteMemory.model_validate(data)
                 self._delete_memory(req)
+                self.broadcast_full_state()
                 emit("action_result", {"action": "delete_memory", "status": "success",
                      "message": f"Memory {req.memory_name} deleted"})
             except Exception as e:
@@ -249,6 +311,7 @@ class SerenaDashboardAPI:
             try:
                 req = RequestRenameMemory.model_validate(data)
                 result = self._rename_memory(req)
+                self.broadcast_full_state()
                 emit("action_result", {"action": "rename_memory", "status": "success", "message": result})
             except Exception as e:
                 emit("action_result", {"action": "rename_memory", "status": "error", "message": str(e)})
@@ -281,6 +344,7 @@ class SerenaDashboardAPI:
             try:
                 req = RequestSaveSerenaConfig.model_validate(data)
                 self._save_serena_config(req)
+                self.broadcast_full_state()
                 emit("action_result", {"action": "save_config", "status": "success"})
             except Exception as e:
                 emit("action_result", {"action": "save_config", "status": "error", "message": str(e)})
@@ -290,6 +354,7 @@ class SerenaDashboardAPI:
             try:
                 req = RequestAddLanguage.model_validate(data)
                 self._add_language(req)
+                self.broadcast_full_state()
                 emit("action_result", {"action": "add_language", "status": "success",
                      "message": f"Language {req.language} added"})
             except Exception as e:
@@ -300,6 +365,7 @@ class SerenaDashboardAPI:
             try:
                 req = RequestRemoveLanguage.model_validate(data)
                 self._remove_language(req)
+                self.broadcast_full_state()
                 emit("action_result", {"action": "remove_language", "status": "success",
                      "message": f"Language {req.language} removed"})
             except Exception as e:
@@ -330,6 +396,21 @@ class SerenaDashboardAPI:
             if self._tool_usage_stats is not None:
                 emit("tool_stats", {"stats": self._tool_usage_stats.get_tool_stats_dict()})
 
+        @self._socketio.on("request_execution_state")
+        def handle_request_execution_state():
+            """Client requests fresh execution queue + last execution."""
+            try:
+                current_tasks = self._agent.get_current_tasks()
+                executions = [QueuedExecution.from_task_info(t).model_dump() for t in current_tasks]
+                last = self._agent.get_last_executed_task()
+                last_execution = QueuedExecution.from_task_info(last).model_dump() if last else None
+                emit("execution_state", {
+                    "queued_executions": executions,
+                    "last_execution": last_execution,
+                })
+            except Exception:
+                log.debug("Failed to handle request_execution_state", exc_info=True)
+
         @self._socketio.on("mark_news_read")
         def handle_mark_news_read(data):
             try:
@@ -356,44 +437,7 @@ class SerenaDashboardAPI:
         def get_heartbeat() -> dict[str, Any]:
             return {"status": "alive"}
 
-        # REST endpoints kept for backward compatibility (serena_session.py HTTP bridge)
-        @self._app.route("/get_log_messages", methods=["POST"])
-        def get_log_messages() -> dict[str, Any]:
-            request_data = request.get_json()
-            if not request_data:
-                request_log = RequestLog()
-            else:
-                request_log = RequestLog.model_validate(request_data)
-            result = self._get_log_messages(request_log)
-            return result.model_dump()
-
-        @self._app.route("/get_tool_names", methods=["GET"])
-        def get_tool_names() -> dict[str, Any]:
-            return ResponseToolNames(tool_names=self._tool_names).model_dump()
-
-        @self._app.route("/get_tool_stats", methods=["GET"])
-        def get_tool_stats_route() -> dict[str, Any]:
-            return self._get_tool_stats().model_dump()
-
-        @self._app.route("/clear_tool_stats", methods=["POST"])
-        def clear_tool_stats_route() -> dict[str, str]:
-            self._clear_tool_stats()
-            return {"status": "cleared"}
-
-        @self._app.route("/clear_logs", methods=["POST"])
-        def clear_logs() -> dict[str, str]:
-            self._memory_log_handler.clear_log_messages()
-            return {"status": "cleared"}
-
-        @self._app.route("/get_token_count_estimator_name", methods=["GET"])
-        def get_token_count_estimator_name() -> dict[str, str]:
-            estimator_name = self._tool_usage_stats.token_estimator_name if self._tool_usage_stats else "unknown"
-            return {"token_count_estimator_name": estimator_name}
-
-        @self._app.route("/get_config_overview", methods=["GET"])
-        def get_config_overview() -> dict[str, Any]:
-            result = self._agent.execute_task(self._get_config_overview, logged=False)
-            return result.model_dump()
+        # REST endpoints for hooks HTTP bridge (serena_session.py)
 
         @self._app.route("/shutdown", methods=["PUT"])
         def shutdown() -> dict[str, str]:
@@ -444,6 +488,7 @@ class SerenaDashboardAPI:
                 return {"status": "error", "message": "No data provided"}
             try:
                 self._save_memory(RequestSaveMemory.model_validate(request_data))
+                self.broadcast_full_state()
                 return {"status": "success", "message": "Memory saved"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -455,6 +500,7 @@ class SerenaDashboardAPI:
                 return {"status": "error", "message": "No data provided"}
             try:
                 self._delete_memory(RequestDeleteMemory.model_validate(request_data))
+                self.broadcast_full_state()
                 return {"status": "success", "message": "Memory deleted"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -466,6 +512,7 @@ class SerenaDashboardAPI:
                 return {"status": "error", "message": "No data provided"}
             try:
                 result = self._rename_memory(RequestRenameMemory.model_validate(request_data))
+                self.broadcast_full_state()
                 return {"status": "success", "message": result}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
@@ -484,40 +531,13 @@ class SerenaDashboardAPI:
                 return {"status": "error", "message": "No data provided"}
             try:
                 self._save_serena_config(RequestSaveSerenaConfig.model_validate(request_data))
+                self.broadcast_full_state()
                 return {"status": "success", "message": "Config saved"}
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
-        @self._app.route("/queued_task_executions", methods=["GET"])
-        def get_queued_executions() -> dict[str, Any]:
-            try:
-                current = self._agent.get_current_tasks()
-                response = [QueuedExecution.from_task_info(t).model_dump() for t in current]
-                return {"queued_executions": response, "status": "success"}
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
-
-        @self._app.route("/cancel_task_execution", methods=["POST"])
-        def cancel_task_execution() -> dict[str, Any]:
-            request_data = request.get_json()
-            try:
-                req = RequestCancelTaskExecution.model_validate(request_data)
-                for task in self._agent.get_current_tasks():
-                    if task.task_id == req.task_id:
-                        task.cancel()
-                        return {"status": "success", "was_cancelled": True}
-                return {"status": "success", "was_cancelled": False, "message": "Task not found"}
-            except Exception as e:
-                return {"status": "error", "message": str(e), "was_cancelled": False}
-
-        @self._app.route("/last_execution", methods=["GET"])
-        def get_last_execution() -> dict[str, Any]:
-            try:
-                last = self._agent.get_last_executed_task()
-                response = QueuedExecution.from_task_info(last).model_dump() if last else None
-                return {"last_execution": response, "status": "success"}
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
+        # /queued_task_executions, /cancel_task_execution, /last_execution
+        # removed — WebSocket execution_state and cancel_task handle these
 
         @self._app.route("/news_snippet_ids", methods=["GET"])
         def get_news_snippet_ids() -> dict[str, str | list[int]]:
