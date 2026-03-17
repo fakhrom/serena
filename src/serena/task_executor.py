@@ -16,7 +16,7 @@ T = TypeVar("T")
 
 
 class TaskExecutor:
-    def __init__(self, name: str):
+    def __init__(self, name: str, event_callback: Callable[[dict], None] | None = None):
         self._task_executor_lock = threading.Lock()
         self._task_executor_queue: list[TaskExecutor.Task] = []
         self._task_executor_thread = Thread(target=self._process_task_queue, name=name, daemon=True)
@@ -24,6 +24,7 @@ class TaskExecutor:
         self._task_executor_task_index = 1
         self._task_executor_current_task: TaskExecutor.Task | None = None
         self._task_executor_last_executed_task_info: TaskExecutor.TaskInfo | None = None
+        self._event_callback = event_callback
 
     class Task(ToStringMixin, Generic[T]):
         def __init__(self, function: Callable[[], T], name: str, logged: bool = True, timeout: float | None = None):
@@ -121,6 +122,11 @@ class TaskExecutor:
                 self._task_executor_current_task = task
             if task.logged:
                 log.info("Starting execution of %s", task.name)
+
+            # emit task_started event
+            if self._event_callback is not None:
+                self._event_callback({"event": "task_started", "name": task.name, "task_id": id(task)})
+
             task.start()
 
             # wait for task completion
@@ -129,6 +135,11 @@ class TaskExecutor:
                 self._task_executor_current_task = None
                 if task.logged:
                     self._task_executor_last_executed_task_info = self.TaskInfo.from_task(task, is_running=False)
+
+            # emit task_completed event
+            if self._event_callback is not None:
+                success = task.future.done() and not task.future.cancelled() and task.future.exception() is None
+                self._event_callback({"event": "task_completed", "name": task.name, "task_id": id(task), "success": success})
 
     @dataclass
     class TaskInfo:
@@ -192,6 +203,11 @@ class TaskExecutor:
                 log.info(f"Scheduling {task_name}")
             task_obj = self.Task(function=task, name=task_name, logged=logged, timeout=timeout)
             self._task_executor_queue.append(task_obj)
+
+            # emit task_scheduled event
+            if self._event_callback is not None:
+                self._event_callback({"event": "task_scheduled", "name": task_name})
+
             return task_obj
 
     def execute_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> T:
