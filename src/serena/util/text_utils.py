@@ -500,6 +500,9 @@ class ContentReplacer:
             refer to matched groups in the search expression
         :return: the updated content after performing the replacement
         """
+        # Decode escape sequences that arrive as literal backslash sequences through MCP/XML transport
+        repl = repl.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+
         if self.mode == "literal":
             regex = re.escape(needle)
         elif self.mode == "regex":
