@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-import pathspec
 from pathspec import PathSpec
 from sensai.util.logging import LogTime
 
@@ -115,7 +114,7 @@ class GitignoreSpec:
 
     def __post_init__(self) -> None:
         """Initialize the PathSpec from patterns."""
-        self.pathspec = PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, self.patterns)
+        self.pathspec = PathSpec.from_lines("gitwildmatch", self.patterns)
 
     def matches(self, relative_path: str) -> bool:
         """

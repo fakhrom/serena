@@ -1,0 +1,8 @@
+{
+  "include": ["src"],
+  "exclude": ["src/serena/agno.py"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
+}

@@ -303,7 +303,7 @@ class Project(ToStringMixin):
                 pattern = pattern.replace(os.path.sep, "/")
                 processed_patterns.append(pattern)
             log.debug(f"Processing {len(processed_patterns)} ignored paths")
-            self.__ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, processed_patterns)
+            self.__ignore_spec = pathspec.PathSpec.from_lines("gitwildmatch", processed_patterns)
 
         self._ignore_spec_available.set()
 

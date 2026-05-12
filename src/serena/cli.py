@@ -784,7 +784,7 @@ class ProjectCommands(AutoRegisteringGroup):
                 if verbose:
                     click.echo(f"Symbols in file '{file}':")
                     for symbol in symbols:
-                        click.echo(f"  - {symbol['name']} at line {symbol['selectionRange']['start']['line']} of kind {symbol['kind']}")
+                        click.echo(f"  - {symbol.get('name', '?')} at line {symbol.get('selectionRange', {}).get('start', {}).get('line', '?')} of kind {symbol.get('kind', '?')}")  # type: ignore[arg-type]
                 ls.save_cache()
                 click.echo(f"Successfully indexed file '{file}', {len(symbols)} symbols saved to cache in {ls.cache_dir}.")
         finally:
@@ -879,8 +879,8 @@ class ProjectCommands(AutoRegisteringGroup):
                     selected_symbol = overview_data[0]
                     log.info("No class or function found, using first available symbol")
 
-                symbol_name = selected_symbol["name"]
-                symbol_kind = selected_symbol["kind"]
+                symbol_name = selected_symbol.get("name", "unknown")  # type: ignore[arg-type]
+                symbol_kind = selected_symbol.get("kind", 0)  # type: ignore[arg-type]
                 log.info("Using symbol for testing: %s (kind: %s)", symbol_name, symbol_kind)
 
                 # Test 2: FindSymbolTool

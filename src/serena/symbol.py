@@ -910,7 +910,10 @@ class JetBrainsSymbol(Symbol):
         if not self.is_position_in_file_available():
             return None
         if self._cached_body_start_position is None:
-            pos = self._dict["text_range"]["start_pos"]
+            text_range = self._dict.get("text_range")  # type: ignore[call-overload]
+            if text_range is None:
+                return None
+            pos = text_range["start_pos"]
             line, col = pos["line"], pos["col"]
             self._cached_body_start_position = PositionInFile(line=line, col=col)
         return self._cached_body_start_position
@@ -919,7 +922,10 @@ class JetBrainsSymbol(Symbol):
         if not self.is_position_in_file_available():
             return None
         if self._cached_body_end_position is None:
-            pos = self._dict["text_range"]["end_pos"]
+            text_range = self._dict.get("text_range")  # type: ignore[call-overload]
+            if text_range is None:
+                return None
+            pos = text_range["end_pos"]
             line, col = pos["line"], pos["col"]
             self._cached_body_end_position = PositionInFile(line=line, col=col)
         return self._cached_body_end_position

@@ -107,7 +107,7 @@ class ApplyMethodProtocol(Protocol):
     """Callable protocol for the apply method of a tool."""
 
     def __call__(self, *args: Any, **kwargs: Any) -> str:
-        pass
+        ...
 
 
 class Tool(Component):

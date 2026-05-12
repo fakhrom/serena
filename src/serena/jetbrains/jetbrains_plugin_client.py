@@ -2,7 +2,7 @@
 Client for the Serena JetBrains Plugin
 """
 
-import concurrent
+import concurrent.futures
 import json
 import logging
 import re
@@ -218,7 +218,7 @@ class JetBrainsPluginClient(ToStringMixin):
         return ["_port", "project_root", "_plugin_version"]
 
     @classmethod
-    def from_project(cls, project: Project) -> Self:
+    def from_project(cls, project: Project) -> "JetBrainsPluginClient":
         resolved_path = Path(project.project_root).resolve()
 
         if cls._last_port is not None:
@@ -356,7 +356,7 @@ class JetBrainsPluginClient(ToStringMixin):
             else:
                 return x
 
-        return convert(response)
+        return cast(T, convert(response))
 
     def _postprocess_symbol_collection_response(self, response_dict: jb.SymbolCollectionResponse) -> None:
         """
@@ -367,7 +367,7 @@ class JetBrainsPluginClient(ToStringMixin):
 
         def convert_html(key: Literal["documentation", "quick_info"], symbol: jb.SymbolDTO) -> None:
             if key in symbol:
-                doc_html: str = symbol[key]
+                doc_html: str = cast(str, symbol.get(key))  # type: ignore[arg-type]
                 doc_text = render_html(doc_html)
                 if doc_text:
                     symbol[key] = doc_text

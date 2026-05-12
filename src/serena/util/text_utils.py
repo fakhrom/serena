@@ -396,6 +396,8 @@ def search_files(
     skipped_file_error_tuples = []
 
     for result in results:
+        if result is None:
+            continue
         if result["error"]:
             skipped_file_error_tuples.append((result["path"], result["error"]))
         else:
