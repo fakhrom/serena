@@ -97,7 +97,7 @@ class EditMemoryTool(Tool, ToolMarkerCanEdit):
         needle: str,
         repl: str,
         mode: Literal["literal", "regex"],
-        allow_multiple_occurrences: bool = False,
+        allow_multiple_occurrences: bool = True,
     ) -> str:
         r"""
         Replaces content matching a regular expression in a memory.
