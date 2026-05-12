@@ -91,8 +91,23 @@ class CodeEditor(Generic[TSymbol], ABC):
         :param name_path: the name path of the symbol to replace.
         :param relative_file_path: the relative path of the file in which the symbol is defined.
         :param body: the new body
+        :raises ValueError: when the symbol's reported body range covers only its
+            identifier (typical for module-level variables and constants in some
+            language servers). In that case ``replace_body`` would silently
+            corrupt the file by replacing the identifier and leaving the original
+            value in place; callers must use ``replace_content`` or
+            ``replace_lines`` instead.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
+        if not symbol.body_covers_value():
+            raise ValueError(
+                f"Cannot replace body of symbol '{name_path}' in '{relative_file_path}': "
+                f"the language server reports the symbol's body range as identical to "
+                f"its identifier range. This typically means a module-level variable, "
+                f"constant, or similar low-level symbol whose value the LSP does not "
+                f"surface as part of the symbol body. Use replace_content (literal or "
+                f"regex mode) or replace_lines to edit this symbol's value."
+            )
         start_pos = symbol.get_body_start_position_or_raise()
         end_pos = symbol.get_body_end_position_or_raise()
 

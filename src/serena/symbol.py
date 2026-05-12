@@ -97,6 +97,20 @@ class Symbol(ToStringMixin, ABC):
             raise ValueError(f"Body start position is not defined for {self}")
         return pos
 
+    def body_covers_value(self) -> bool:
+        """
+        :return: True if the symbol's reported body range extends beyond just the
+            identifier itself (so a body-replacement operation can actually
+            substitute the value/definition). False when the body range covers
+            only the identifier — typical for module-level variables and
+            constants reported by some language servers (e.g. Python's pyright),
+            in which case replace_body would corrupt the file by replacing the
+            identifier with the new content and leaving the original value
+            untouched. Subclasses can override to inspect their underlying
+            representation; the default is True (preserves existing behavior).
+        """
+        return True
+
     def get_body_end_position_or_raise(self) -> PositionInFile:
         """
         Get the end position of the symbol body, raising an error if it is not defined.
@@ -296,6 +310,21 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
         start_line = start_pos["line"] if start_pos else None
         end_line = end_pos["line"] if end_pos else None
         return start_line, end_line
+
+    def body_covers_value(self) -> bool:
+        """
+        Override of :meth:`Symbol.body_covers_value` that detects the
+        well-known language-server failure mode where the body range
+        equals the identifier's selection range. When that happens, a
+        body-replacement would leave the original value in place and
+        only swap the identifier — silently corrupting the source file.
+        """
+        selection_range = self.symbol_root.get("selectionRange")
+        location = self.symbol_root.get("location") or {}
+        body_range = location.get("range")
+        if selection_range is None or body_range is None:
+            return True
+        return selection_range != body_range
 
     @property
     def line(self) -> int | None:

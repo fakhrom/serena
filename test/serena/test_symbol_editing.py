@@ -444,6 +444,34 @@ def test_replace_body(test_case: ReplaceBodyTest, snapshot: SnapshotAssertion):
     test_case.run_test(content_after_ground_truth=snapshot)
 
 
+@pytest.mark.python
+def test_replace_body_rejects_module_level_variable() -> None:
+    """Regression: replace_body must refuse module-level variables/constants.
+
+    The language server reports the body range of a module-level variable as
+    identical to its identifier range. Without a guard, the call deletes only
+    the identifier and inserts the new body before the original value,
+    silently corrupting the source file (e.g.
+    ``MINIMUM = 50`` would become ``MINIMUM = 250 = 50``). The guard must
+    raise a ``ValueError`` directing the caller to a content-based tool.
+    """
+    test = ReplaceBodyTest(
+        Language.PYTHON,
+        PYTHON_TEST_REL_FILE_PATH,
+        "module_var",
+        '"Replaced module value"',
+    )
+    with test._setup() as symbol_retriever:
+        content_before = test._read_file(test.rel_path)
+        code_editor = LanguageServerCodeEditor(symbol_retriever)
+        with pytest.raises(ValueError, match="identifier range"):
+            code_editor.replace_body(test.symbol_name, test.rel_path, test.new_body)
+        content_after = test._read_file(test.rel_path)
+        assert content_before == content_after, (
+            "replace_body must not modify the file when it raises ValueError"
+        )
+
+
 NIX_ATTR_REPLACEMENT = """c = 3;"""
 
 
