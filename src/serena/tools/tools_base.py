@@ -38,7 +38,31 @@ so the dashboard cannot tell their servers apart; a label such as `opencode:deep
 can. Unset, the handshake's clientInfo is used exactly as before.
 """
 
-CLIENT_LABEL_OVERRIDE = os.environ.get(CLIENT_LABEL_ENVIRONMENT_VARIABLE, "").strip()
+
+class _ClientLabel:
+    """One mutable slot, so the label can arrive after import without a global statement."""
+
+    value: str = os.environ.get(CLIENT_LABEL_ENVIRONMENT_VARIABLE, "").strip()
+
+
+def client_label() -> str:
+    """The explicit label for this server's client, or "" if none was supplied.
+
+    Settable rather than constant because it may arrive from `client_label_command` in
+    the configuration, which cannot run until the configuration has been read -- later
+    than this module is imported, but still before the dashboard starts.
+    """
+    return _ClientLabel.value
+
+
+def set_client_label(label: str) -> None:
+    """Supply the client label discovered after import. Ignores an empty value."""
+    label = (label or "").strip()
+    if not label:
+        return
+    _ClientLabel.value = label
+    Tool.set_last_tool_call_client_str(describe_client(label))
+
 
 CLIENT_MODEL_ENVIRONMENT_VARIABLE = "SERENA_CLIENT_MODEL"
 """The model this server's client is running, shown alongside the client in the dashboard.
@@ -157,7 +181,7 @@ class Tool(Component):
     # (which is use by the LLM, so a good description is important)
     # and to validate the tool call arguments.
 
-    _last_tool_call_client_str: str | None = describe_client(CLIENT_LABEL_OVERRIDE)
+    _last_tool_call_client_str: str | None = describe_client(_ClientLabel.value)
     """We can only get the client info from within a tool call. Each tool call will update this variable.
 
     Seeded from SERENA_CLIENT_LABEL and SERENA_CLIENT_MODEL when those are set, so the
@@ -294,7 +318,7 @@ class Tool(Component):
         """
         Applies the tool with logging and exception handling, using the given keyword arguments
         """
-        if mcp_ctx is not None and not CLIENT_LABEL_OVERRIDE:
+        if mcp_ctx is not None and not client_label():
             try:
                 client_params = mcp_ctx.session.client_params
                 if client_params is not None:

@@ -44,6 +44,16 @@ web_dashboard: True
 # the address the web dashboard will listen on (bind address).
 web_dashboard_listen_address: 127.0.0.1
 
+# a command Serena runs ONCE at startup to discover who its client is, printing the
+# label on its last non-empty line.
+# The MCP handshake tells Serena a client's name and version, but never which model is
+# driving it -- so several servers of the same client are indistinguishable, which
+# matters when one client runs several sessions. Working that out needs knowledge that
+# differs per client and per project, so Serena asks instead of guessing.
+# OFF unless set: leave it out and nothing is executed. SERENA_CLIENT_LABEL takes
+# precedence, so an explicitly labelled server never runs the command.
+# client_label_command: "python /path/to/identify-my-client.py"
+
 # the preferred port for the web dashboard. Leave unset for the default (24282).
 # When several Serena servers run at once, each starts its own dashboard and the port
 # is otherwise assigned by start order, so restarting them in a different order swaps

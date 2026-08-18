@@ -47,11 +47,18 @@ dashboards, and a bookmarked URL then shows the other session. Two ways to fix t
   to prefer when the servers are launched by a client whose own identity you control,
   since it makes the dashboard self-identifying as well as stable.
 
+* **Let Serena ask who its client is.** Set `client_label_command` in `serena_config.yml`
+  to a command that prints the label. Serena runs it once at startup and uses the last
+  non-empty line. This suits clients that spawn Serena themselves: the command can look at
+  the process that spawned it and work out both which client and which model, so one
+  setting serves every client without naming any of them. It is off unless set, and
+  `SERENA_CLIENT_LABEL` takes precedence, so an explicitly labelled server never runs it.
+
 * **Fix the port explicitly.** Set `web_dashboard_port` in `serena_config.yml`, pass
   `--web-dashboard-port` to `start-mcp-server`, or set the `SERENA_DASHBOARD_PORT`
   environment variable. An explicit port takes precedence over a derived one.
 
-In both cases, an occupied port still falls through to the next free one, so neither
+In every case, an occupied port still falls through to the next free one, so neither
 setting can prevent a server from starting.
 
 :::{tip}

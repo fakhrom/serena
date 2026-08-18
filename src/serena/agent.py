@@ -363,6 +363,13 @@ class SerenaAgent:
         self._active_tools: AvailableTools
         self._update_active_tools()
 
+        # Ask, if configured, WHO this server's client is -- before the dashboard starts,
+        # because the dashboard port is derived from that answer. Serena cannot work this
+        # out itself: identifying "Claude running claude-opus-5" or "OpenCode on
+        # big-pickle" needs knowledge that differs per client and per project. So the
+        # knowledge stays outside and Serena just asks.
+        self._resolve_client_label()
+
         # start the dashboard (web frontend), registering its log handler
         # should be the last thing to happen in the initialization since the dashboard
         # may access various parts of the agent
@@ -528,6 +535,45 @@ class SerenaAgent:
         :return: the URL of the web dashboard, or None if the dashboard is not running
         """
         return self._dashboard_url
+
+    def _resolve_client_label(self) -> None:
+        """Run `client_label_command`, if set, and adopt its output as the client label.
+
+        Does nothing unless the setting is present, so a Serena that was never configured
+        for this executes nothing. SERENA_CLIENT_LABEL wins, so an explicitly labelled
+        server never pays for the command either.
+
+        Every failure is silent and non-fatal: a wrong or slow command must degrade to the
+        MCP handshake's clientInfo, which is what Serena used before this existed. A
+        naming convenience is not worth failing a server start over.
+        """
+        from serena.tools.tools_base import client_label, set_client_label
+
+        command = (self.serena_config.client_label_command or "").strip()
+        if not command or client_label():
+            return
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception as e:
+            log.info("client_label_command did not run: %s", e)
+            return
+        if completed.returncode != 0:
+            log.info("client_label_command exited %d; keeping clientInfo", completed.returncode)
+            return
+        # The LAST non-empty line, so a command that also logs to stdout still works.
+        lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+        if not lines:
+            log.info("client_label_command printed nothing; keeping clientInfo")
+            return
+        set_client_label(lines[-1])
+        log.info("Client label from client_label_command: %r", lines[-1])
 
     def open_dashboard(self) -> bool:
         """

@@ -652,6 +652,18 @@ class SerenaConfig(SharedConfig):
     web_dashboard_open_on_launch: bool = True
     web_dashboard_listen_address: str = "127.0.0.1"
     web_dashboard_port: int | None = None
+    client_label_command: str | None = None
+    """A command Serena runs ONCE at startup to discover who its client is.
+
+    Serena is told a client's name and version by the MCP handshake, but never which
+    model is driving it, and several servers of the same client are therefore
+    indistinguishable. Working that out requires knowledge Serena does not have and
+    should not contain -- it differs per client and per project. So Serena asks: it runs
+    this command and uses the last non-empty line of its output as the client label.
+
+    OFF BY DEFAULT, and it does what it says: Serena will execute the command you put
+    here. Leave it unset and nothing runs. SERENA_CLIENT_LABEL still takes precedence,
+    so an explicitly labelled server never pays for the command."""
     """Preferred port for the web dashboard; None uses the default (24282) or, when
     SERENA_CLIENT_LABEL is set, a port derived from that label so concurrent servers
     keep stable, distinct dashboards. The server still scans upward from this port if

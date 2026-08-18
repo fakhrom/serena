@@ -85,15 +85,16 @@ def resolve_dashboard_start_port(configured_port: int | None = None) -> int:
 
     # Imported here rather than at module scope: tools_base pulls in the whole tool
     # hierarchy, and the dashboard is imported during agent construction.
-    from serena.tools.tools_base import CLIENT_LABEL_OVERRIDE
+    from serena.tools.tools_base import client_label
 
-    if CLIENT_LABEL_OVERRIDE:
+    label = client_label()
+    if label:
         import hashlib
 
-        digest = hashlib.sha256(CLIENT_LABEL_OVERRIDE.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(label.encode("utf-8")).hexdigest()
         offset = int(digest[:8], 16) % CLIENT_LABEL_PORT_WINDOW
         derived = DEFAULT_DASHBOARD_PORT + offset
-        log.info("Dashboard port derived from client label %r: %d", CLIENT_LABEL_OVERRIDE, derived)
+        log.info("Dashboard port derived from client label %r: %d", label, derived)
         return derived
 
     return DEFAULT_DASHBOARD_PORT
