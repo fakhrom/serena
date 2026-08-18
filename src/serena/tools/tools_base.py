@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 from abc import ABC
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -27,6 +28,42 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
+
+CLIENT_LABEL_ENVIRONMENT_VARIABLE = "SERENA_CLIENT_LABEL"
+"""Names this server's client explicitly, overriding the MCP handshake's clientInfo.
+
+Set it when several processes of the SAME client run against one project at once --
+two OpenCode sessions on different models, say. They advertise identical clientInfo,
+so the dashboard cannot tell their servers apart; a label such as `opencode:deepseek`
+can. Unset, the handshake's clientInfo is used exactly as before.
+"""
+
+CLIENT_LABEL_OVERRIDE = os.environ.get(CLIENT_LABEL_ENVIRONMENT_VARIABLE, "").strip()
+
+CLIENT_MODEL_ENVIRONMENT_VARIABLE = "SERENA_CLIENT_MODEL"
+"""The model this server's client is running, shown alongside the client in the dashboard.
+
+The MCP handshake carries the client's name and version but never says which model is
+driving it, so two sessions of one client are indistinguishable in the dashboard even
+when they differ in the way that matters most. The client knows, so it states it here.
+
+Kept SEPARATE from the label rather than folded into it, because the two answer
+different questions: the label is WHO this session is and is what the dashboard port is
+derived from; the model is WHAT it is running. Whether those are coupled is the client's
+decision, not Serena's -- a client that treats every model as a distinct participant
+will simply derive its label from its model, and both values then agree.
+"""
+
+CLIENT_MODEL_OVERRIDE = os.environ.get(CLIENT_MODEL_ENVIRONMENT_VARIABLE, "").strip()
+
+
+def describe_client(client_name: str | None) -> str | None:
+    """Render a client for display, appending the model when one was declared."""
+    if not client_name:
+        return CLIENT_MODEL_OVERRIDE or None
+    if CLIENT_MODEL_OVERRIDE:
+        return f"{client_name} ({CLIENT_MODEL_OVERRIDE})"
+    return client_name
 
 
 class Component(ABC):
@@ -106,8 +143,7 @@ class ToolMarkerSymbolicEdit(ToolMarkerCanEdit):
 class ApplyMethodProtocol(Protocol):
     """Callable protocol for the apply method of a tool."""
 
-    def __call__(self, *args: Any, **kwargs: Any) -> str:
-        ...
+    def __call__(self, *args: Any, **kwargs: Any) -> str: ...
 
 
 class Tool(Component):
@@ -121,16 +157,28 @@ class Tool(Component):
     # (which is use by the LLM, so a good description is important)
     # and to validate the tool call arguments.
 
-    _last_tool_call_client_str: str | None = None
-    """We can only get the client info from within a tool call. Each tool call will update this variable."""
+    _last_tool_call_client_str: str | None = describe_client(CLIENT_LABEL_OVERRIDE)
+    """We can only get the client info from within a tool call. Each tool call will update this variable.
+
+    Seeded from SERENA_CLIENT_LABEL and SERENA_CLIENT_MODEL when those are set, so the
+    dashboard identifies the client from the moment the server starts rather than only
+    after the first tool call.
+    """
 
     @classmethod
     def set_last_tool_call_client_str(cls, client_str: str | None) -> None:
-        cls._last_tool_call_client_str = client_str
+        # Bind on Tool, NOT on cls. This is invoked as self.set_last_tool_call_client_str(...)
+        # from apply_ex, so cls is the concrete tool subclass (ReadMemoryTool, ...) and
+        # `cls._last_tool_call_client_str = ...` would create a SHADOWING attribute on that
+        # subclass while Tool's own stays None. The dashboard reads Tool.get_last_tool_call_client_str(),
+        # so it showed "Current Client: None" forever, for every client, however many tools ran.
+        Tool._last_tool_call_client_str = client_str
 
     @classmethod
     def get_last_tool_call_client_str(cls) -> str | None:
-        return cls._last_tool_call_client_str
+        # Read from Tool for the same reason the setter writes to it: a subclass lookup
+        # would find an inherited or shadowed value depending on which tool ran last.
+        return Tool._last_tool_call_client_str
 
     @classmethod
     def get_name_from_cls(cls) -> str:
@@ -246,12 +294,16 @@ class Tool(Component):
         """
         Applies the tool with logging and exception handling, using the given keyword arguments
         """
-        if mcp_ctx is not None:
+        if mcp_ctx is not None and not CLIENT_LABEL_OVERRIDE:
             try:
                 client_params = mcp_ctx.session.client_params
                 if client_params is not None:
                     client_info = cast(Implementation, client_params.clientInfo)
                     client_str = client_info.title if client_info.title else client_info.name + " " + client_info.version
+                    # The handshake never carries the model, so append the declared one
+                    # here too: a client that names its model but not itself should still
+                    # show both.
+                    client_str = describe_client(client_str) or client_str
                     if client_str != self.get_last_tool_call_client_str():
                         log.debug(f"Updating client info: {client_info}")
                         self.set_last_tool_call_client_str(client_str)

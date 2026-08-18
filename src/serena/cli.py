@@ -17,7 +17,7 @@ from sensai.util.string import dict_string
 from tqdm import tqdm
 
 from serena.agent import SerenaAgent
-from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
+from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode, resolve_context_and_modes
 from serena.config.serena_config import (
     LanguageBackend,
     ModeSelectionDefinition,
@@ -160,7 +160,11 @@ class TopLevelCommands(AutoRegisteringGroup):
     @click.option("--project-file", "project", type=PROJECT_TYPE, default=None, help="[DEPRECATED] Use --project instead.")
     @click.argument("project_file_arg", type=PROJECT_TYPE, required=False, default=None, metavar="")
     @click.option(
-        "--context", type=str, default=DEFAULT_CONTEXT, show_default=True, help="Built-in context name or path to custom context YAML."
+        "--context",
+        type=str,
+        default=None,
+        help="Built-in context name or path to custom context YAML. "
+        f"Falls back to the SERENA_CONTEXT environment variable, then to '{DEFAULT_CONTEXT}'.",
     )
     @click.option(
         "--mode",
@@ -169,7 +173,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         multiple=True,
         default=(),
         show_default=False,
-        help=_MODES_EXPLANATION,
+        help=_MODES_EXPLANATION + " Falls back to the SERENA_MODES environment variable (comma-separated) when not given.",
     )
     @click.option(
         "--language-backend",
@@ -218,6 +222,14 @@ class TopLevelCommands(AutoRegisteringGroup):
         help="Open Serena's dashboard in your browser after MCP server startup (overriding the setting in Serena's config).",
     )
     @click.option(
+        "--web-dashboard-port",
+        type=int,
+        default=None,
+        help="Preferred port for the web dashboard (overriding the setting in Serena's config). "
+        "Useful when several servers run concurrently and you want each dashboard at a fixed, known port. "
+        "If the port is occupied, the next free one is used, so this cannot prevent startup.",
+    )
+    @click.option(
         "--log-level",
         type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]),
         default=None,
@@ -235,7 +247,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         project: str | None,
         project_file_arg: str | None,
         project_from_cwd: bool | None,
-        context: str,
+        context: str | None,
         modes: Sequence[str],
         language_backend: str | None,
         transport: Literal["stdio", "sse", "streamable-http"],
@@ -243,6 +255,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         port: int,
         enable_web_dashboard: bool | None,
         open_web_dashboard: bool | None,
+        web_dashboard_port: int | None,
         enable_gui_log_window: bool | None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
         trace_lsp_communication: bool | None,
@@ -266,6 +279,13 @@ class TopLevelCommands(AutoRegisteringGroup):
         Logger.root.addHandler(file_handler)
 
         log.info("Initializing Serena MCP server")
+
+        # A client that launches several servers from ONE configuration cannot vary
+        # their command lines, so the toolset would be identical for every session it
+        # starts. The environment CAN vary per process, so it serves as the fallback
+        # layer beneath the command line: explicit flags still win.
+        context, modes = resolve_context_and_modes(context, modes)
+        log.info("Context: %s; default modes: %s", context, list(modes) or "(from configuration)")
         log.info("Storing logs in %s", log_path)
 
         # Handle --project-from-cwd flag
@@ -287,6 +307,7 @@ class TopLevelCommands(AutoRegisteringGroup):
             language_backend=LanguageBackend.from_str(language_backend) if language_backend else None,
             enable_web_dashboard=enable_web_dashboard,
             open_web_dashboard=open_web_dashboard,
+            web_dashboard_port=web_dashboard_port,
             enable_gui_log_window=enable_gui_log_window,
             log_level=log_level,
             trace_lsp_communication=trace_lsp_communication,

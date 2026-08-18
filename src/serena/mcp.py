@@ -277,6 +277,7 @@ class SerenaMCPFactory:
         enable_web_dashboard: bool | None = None,
         enable_gui_log_window: bool | None = None,
         open_web_dashboard: bool | None = None,
+        web_dashboard_port: int | None = None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None,
         trace_lsp_communication: bool | None = None,
         tool_timeout: float | None = None,
@@ -293,6 +294,8 @@ class SerenaMCPFactory:
             If not specified, will take the value from the serena configuration.
         :param open_web_dashboard: Whether to open the web dashboard on launch.
             If not specified, will take the value from the serena configuration.
+        :param web_dashboard_port: Preferred port for the web dashboard. If not specified, will take the value from the
+            serena configuration, which in turn falls back to a port derived from SERENA_CLIENT_LABEL or the default.
         :param log_level: Log level. If not specified, will take the value from the serena configuration.
         :param trace_lsp_communication: Whether to trace the communication between Serena and the language servers.
             This is useful for debugging language server issues.
@@ -308,6 +311,8 @@ class SerenaMCPFactory:
                 config.gui_log_window = enable_gui_log_window
             if open_web_dashboard is not None:
                 config.web_dashboard_open_on_launch = open_web_dashboard
+            if web_dashboard_port is not None:
+                config.web_dashboard_port = web_dashboard_port
             if log_level is not None:
                 log_level = cast(Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], log_level.upper())
                 config.log_level = logging.getLevelNamesMapping()[log_level]
@@ -332,7 +337,7 @@ class SerenaMCPFactory:
         # retain only FASTMCP_ prefix for already set environment variables.
         Settings.model_config = SettingsConfigDict(env_prefix="FASTMCP_")
         instructions = self._get_initial_instructions()
-        mcp = FastMCP(lifespan=self.server_lifespan, host=host, port=port, instructions=instructions)
+        mcp = FastMCP(lifespan=self.server_lifespan, host=host, port=port)
         return mcp
 
     @asynccontextmanager
@@ -343,6 +348,9 @@ class SerenaMCPFactory:
         log.info("MCP server lifetime setup complete")
         yield
         log.info("MCP server shutting down")
+        if self.agent and self.agent._active_project:
+            log.info("Shutting down active project and language servers")
+            self.agent._active_project.shutdown()
 
     def _get_initial_instructions(self) -> str:
         assert self.agent is not None

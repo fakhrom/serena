@@ -25,6 +25,39 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+CONTEXT_ENVIRONMENT_VARIABLE = "SERENA_CONTEXT"
+"""Context for this server, used when --context is not given on the command line."""
+
+MODES_ENVIRONMENT_VARIABLE = "SERENA_MODES"
+"""Comma-separated default modes, used when --mode is not given on the command line."""
+
+
+def resolve_context_and_modes(
+    context: str | None, modes: tuple[str, ...] | list[str]
+) -> tuple[str, tuple[str, ...]]:
+    """Settle which context and default modes this server runs with.
+
+    Precedence, highest first: the command line, then the environment, then the
+    configured default. The environment layer exists because a client that starts
+    SEVERAL servers usually does so from ONE configuration entry: the command line it
+    passes is fixed, so every session it launches would otherwise get an identical
+    toolset. Per-process environment is the only thing such a client can vary, so it
+    is what lets two sessions of one client differ in what they can do -- for example
+    one session per model, each with its own tools.
+
+    Unset environment variables leave behaviour exactly as it was.
+    """
+    if context is None:
+        context = os.environ.get(CONTEXT_ENVIRONMENT_VARIABLE, "").strip() or DEFAULT_CONTEXT
+
+    resolved_modes = tuple(modes)
+    if not resolved_modes:
+        declared = os.environ.get(MODES_ENVIRONMENT_VARIABLE, "").strip()
+        if declared:
+            resolved_modes = tuple(part.strip() for part in declared.split(",") if part.strip())
+
+    return context, resolved_modes
+
 
 @dataclass(kw_only=True)
 class SerenaAgentMode(ToolInclusionDefinition, ToStringMixin):

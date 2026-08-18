@@ -44,6 +44,18 @@ web_dashboard: True
 # the address the web dashboard will listen on (bind address).
 web_dashboard_listen_address: 127.0.0.1
 
+# the preferred port for the web dashboard. Leave unset for the default (24282).
+# When several Serena servers run at once, each starts its own dashboard and the port
+# is otherwise assigned by start order, so restarting them in a different order swaps
+# which dashboard is on which port. Two ways to make the assignment stable:
+#   - set this (or --web-dashboard-port, or the SERENA_DASHBOARD_PORT environment
+#     variable) to a fixed port per server, or
+#   - set SERENA_CLIENT_LABEL on each server, and the port is derived from that label,
+#     so the same client always gets the same dashboard.
+# In every case, an occupied port falls through to the next free one, so this can
+# never stop the server from starting.
+# web_dashboard_port: 24282
+
 # whether to open a browser window with the web dashboard when Serena starts (provided that web_dashboard
 # is enabled). See also the web_dashboard option.
 # If set to false, you can still open the dashboard manually by

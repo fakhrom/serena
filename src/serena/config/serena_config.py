@@ -651,6 +651,11 @@ class SerenaConfig(SharedConfig):
     web_dashboard: bool = True
     web_dashboard_open_on_launch: bool = True
     web_dashboard_listen_address: str = "127.0.0.1"
+    web_dashboard_port: int | None = None
+    """Preferred port for the web dashboard; None uses the default (24282) or, when
+    SERENA_CLIENT_LABEL is set, a port derived from that label so concurrent servers
+    keep stable, distinct dashboards. The server still scans upward from this port if
+    it is occupied, so setting it cannot prevent startup."""
     jetbrains_plugin_server_address: str = "127.0.0.1"
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT
 

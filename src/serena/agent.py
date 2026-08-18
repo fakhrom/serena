@@ -28,7 +28,7 @@ from serena.config.serena_config import (
     SerenaPaths,
     ToolInclusionDefinition,
 )
-from serena.dashboard import SerenaDashboardAPI
+from serena.dashboard import SerenaDashboardAPI, resolve_dashboard_start_port
 from serena.ls_manager import LanguageServerManager
 from serena.project import MemoriesManager, Project
 from serena.prompt_factory import SerenaPromptFactory
@@ -367,14 +367,13 @@ class SerenaAgent:
         # should be the last thing to happen in the initialization since the dashboard
         # may access various parts of the agent
         if self.serena_config.web_dashboard:
-            dashboard_api = SerenaDashboardAPI(
-                get_memory_log_handler(), tool_names, agent=self, tool_usage_stats=self._tool_usage_stats
-            )
+            dashboard_api = SerenaDashboardAPI(get_memory_log_handler(), tool_names, agent=self, tool_usage_stats=self._tool_usage_stats)
             self._dashboard_api = dashboard_api
             # Wire TaskExecutor events to WebSocket broadcast
             self._task_executor._event_callback = dashboard_api._on_task_event
             self._dashboard_thread, port = dashboard_api.run_in_thread(
-                host=self.serena_config.web_dashboard_listen_address
+                host=self.serena_config.web_dashboard_listen_address,
+                start_port=resolve_dashboard_start_port(self.serena_config.web_dashboard_port),
             )
             dashboard_host = self.serena_config.web_dashboard_listen_address
             if dashboard_host == "0.0.0.0":
@@ -544,12 +543,32 @@ class SerenaAgent:
             return False
 
         # Use a subprocess to avoid any output from webbrowser.open being written to stdout
+        creation_flags = 0
+        startup_info = None
+        if sys.platform == "win32":
+            # OPEN IT, BUT DO NOT STEAL THE FOREGROUND. Several agent sessions may start at
+            # once, and each one yanking the browser to the front interrupts whatever the
+            # user is typing at that moment -- which, for a tool meant to run quietly
+            # alongside the work, is the wrong default. STARTF_USESHOWWINDOW with
+            # SW_SHOWNOACTIVATE asks Windows to show the window without activating it.
+            #
+            # This is a request, not a guarantee: an ALREADY-RUNNING browser handles the
+            # URL in its own existing process, and how it surfaces the new tab is that
+            # browser's decision, not ours. It reliably prevents the launch of a NEW
+            # browser window from taking focus.
+            startup_info = subprocess.STARTUPINFO()
+            startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup_info.wShowWindow = 4  # SW_SHOWNOACTIVATE
+            creation_flags = subprocess.CREATE_NO_WINDOW
+
         subprocess.Popen(
             [sys.executable, "-c", f"import webbrowser; webbrowser.open({self._dashboard_url!r})"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # Detach from parent process
+            startupinfo=startup_info,
+            creationflags=creation_flags,
         )
         return True
 

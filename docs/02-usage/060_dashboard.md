@@ -11,6 +11,8 @@ Serena comes with built-in tools for monitoring and managing the current session
   
   By default, it will be accessible at `http://localhost:24282/dashboard/index.html`,
   but a higher port may be used if the default port is unavailable/multiple instances are running.
+  See [Running Several Servers at Once](several-servers) if you do run several and want each
+  dashboard to keep a stable port.
 
   **We recommend always enabling the dashboard**. If you don't want the browser to open automatically,
   you can disable it while still keeping the dashboard running in the background (see below).
@@ -25,6 +27,40 @@ Serena comes with built-in tools for monitoring and managing the current session
 Both can be configured in Serena's [configuration](050_configuration) file (`serena_config.yml`).
 If enabled, they will automatically be opened as soon as the Serena agent/MCP server is started.
 For the dashboard, this can be disabled if desired (see below).
+
+(several-servers)=
+## Running Several Servers at Once
+
+Serena servers started in stdio mode are independent processes: several can run against
+the same project at the same time, for example when two agents work on one repository,
+or when one agent runs two sessions on different models. Each starts its own dashboard,
+and each takes the first free port from 24282 upwards, so they never collide.
+
+What they do *not* get automatically is a STABLE assignment. The port depends on which
+server started first, so restarting the pair in the other order swaps the two
+dashboards, and a bookmarked URL then shows the other session. Two ways to fix that:
+
+* **Name the client.** Set the `SERENA_CLIENT_LABEL` environment variable on each server,
+  e.g. `SERENA_CLIENT_LABEL=opencode:deepseek`. The label is shown as *Current Client* in
+  the dashboard's configuration panel, and the dashboard port is derived from it, so the
+  same label always lands on the same port regardless of start order. This is the option
+  to prefer when the servers are launched by a client whose own identity you control,
+  since it makes the dashboard self-identifying as well as stable.
+
+* **Fix the port explicitly.** Set `web_dashboard_port` in `serena_config.yml`, pass
+  `--web-dashboard-port` to `start-mcp-server`, or set the `SERENA_DASHBOARD_PORT`
+  environment variable. An explicit port takes precedence over a derived one.
+
+In both cases, an occupied port still falls through to the next free one, so neither
+setting can prevent a server from starting.
+
+:::{tip}
+If you want the servers to keep entirely separate configuration, logs and language-server
+data as well, give each its own data directory via the `SERENA_HOME` environment variable
+(see [Serena Data Directory](050_configuration.md#serena-data-directory)). This is not
+required for concurrent operation -- it is only needed if you want the settings themselves
+to differ.
+:::
 
 ## Disabling Automatic Browser Opening
 

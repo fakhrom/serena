@@ -35,6 +35,69 @@ log = logging.getLogger(__name__)
 # disable Werkzeug's logging to avoid cluttering the output
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
+DEFAULT_DASHBOARD_PORT = 0x5EDA
+"""The port the dashboard prefers, 24282. Historically hard-coded at the call site."""
+
+DASHBOARD_PORT_ENVIRONMENT_VARIABLE = "SERENA_DASHBOARD_PORT"
+"""Explicit port for this server, overriding the configuration file."""
+
+CLIENT_LABEL_PORT_WINDOW = 64
+"""How many ports a client label may be spread over when deriving a start port.
+
+Bounded so a labelled instance still lands in a small, predictable band around the
+default rather than anywhere in the ephemeral range.
+"""
+
+
+def resolve_dashboard_start_port(configured_port: int | None = None) -> int:
+    """Where to start looking for a free dashboard port.
+
+    Several servers can run against one project at once -- two agents, or one agent
+    running two sessions on different models -- and each starts its own dashboard.
+    Scanning upward from a single default keeps them from colliding, but it makes the
+    assignment depend on START ORDER: restart the pair in the other order and the two
+    dashboards swap ports. Anyone who bookmarked one is now looking at the other.
+
+    So the start port is derived from WHO the server belongs to, when that is known:
+
+      1. SERENA_DASHBOARD_PORT, when set -- an explicit instruction wins.
+      2. ``web_dashboard_port`` from the configuration file.
+      3. Derived from SERENA_CLIENT_LABEL, when set. Same label, same port, every
+         time, independent of which instance started first.
+      4. The default, 24282 -- unchanged behaviour for a single unlabelled server.
+
+    In every case the caller still scans upward from here, so a taken port degrades to
+    the next free one rather than failing to start.
+    """
+    explicit = os.environ.get(DASHBOARD_PORT_ENVIRONMENT_VARIABLE, "").strip()
+    if explicit:
+        try:
+            return int(explicit)
+        except ValueError:
+            log.warning(
+                "%s=%r is not a port number; falling back to the configured or derived port",
+                DASHBOARD_PORT_ENVIRONMENT_VARIABLE,
+                explicit,
+            )
+
+    if configured_port is not None:
+        return configured_port
+
+    # Imported here rather than at module scope: tools_base pulls in the whole tool
+    # hierarchy, and the dashboard is imported during agent construction.
+    from serena.tools.tools_base import CLIENT_LABEL_OVERRIDE
+
+    if CLIENT_LABEL_OVERRIDE:
+        import hashlib
+
+        digest = hashlib.sha256(CLIENT_LABEL_OVERRIDE.encode("utf-8")).hexdigest()
+        offset = int(digest[:8], 16) % CLIENT_LABEL_PORT_WINDOW
+        derived = DEFAULT_DASHBOARD_PORT + offset
+        log.info("Dashboard port derived from client label %r: %d", CLIENT_LABEL_OVERRIDE, derived)
+        return derived
+
+    return DEFAULT_DASHBOARD_PORT
+
 
 class RequestLog(BaseModel):
     start_idx: int = 0
@@ -233,10 +296,13 @@ class SerenaDashboardAPI:
             executions = [QueuedExecution.from_task_info(t).model_dump() for t in current_tasks]
             last = self._agent.get_last_executed_task()
             last_execution = QueuedExecution.from_task_info(last).model_dump() if last else None
-            self.broadcast_event("execution_state", {
-                "queued_executions": executions,
-                "last_execution": last_execution,
-            })
+            self.broadcast_event(
+                "execution_state",
+                {
+                    "queued_executions": executions,
+                    "last_execution": last_execution,
+                },
+            )
         except Exception:
             log.debug("Failed to broadcast execution_state", exc_info=True)
 
@@ -251,11 +317,14 @@ class SerenaDashboardAPI:
                 all_logs = self._memory_log_handler.get_log_messages(from_idx=0)
                 project = self._agent.get_active_project()
                 project_name = project.project_name if project else None
-                emit("initial_logs", {
-                    "messages": all_logs.messages,
-                    "max_idx": all_logs.max_idx,
-                    "active_project": project_name,
-                })
+                emit(
+                    "initial_logs",
+                    {
+                        "messages": all_logs.messages,
+                        "max_idx": all_logs.max_idx,
+                        "active_project": project_name,
+                    },
+                )
 
                 # Send initial tool stats
                 if self._tool_usage_stats is not None:
@@ -273,10 +342,13 @@ class SerenaDashboardAPI:
                 executions = [QueuedExecution.from_task_info(t).model_dump() for t in current_tasks]
                 last = self._agent.get_last_executed_task()
                 last_execution = QueuedExecution.from_task_info(last).model_dump() if last else None
-                emit("execution_state", {
-                    "queued_executions": executions,
-                    "last_execution": last_execution,
-                })
+                emit(
+                    "execution_state",
+                    {
+                        "queued_executions": executions,
+                        "last_execution": last_execution,
+                    },
+                )
 
                 # Send tool names
                 emit("tool_names", {"tool_names": self._tool_names})
@@ -290,8 +362,7 @@ class SerenaDashboardAPI:
                 req = RequestSaveMemory.model_validate(data)
                 self._save_memory(req)
                 self.broadcast_full_state()
-                emit("action_result", {"action": "save_memory", "status": "success",
-                     "message": f"Memory {req.memory_name} saved"})
+                emit("action_result", {"action": "save_memory", "status": "success", "message": f"Memory {req.memory_name} saved"})
             except Exception as e:
                 emit("action_result", {"action": "save_memory", "status": "error", "message": str(e)})
 
@@ -301,8 +372,7 @@ class SerenaDashboardAPI:
                 req = RequestDeleteMemory.model_validate(data)
                 self._delete_memory(req)
                 self.broadcast_full_state()
-                emit("action_result", {"action": "delete_memory", "status": "success",
-                     "message": f"Memory {req.memory_name} deleted"})
+                emit("action_result", {"action": "delete_memory", "status": "success", "message": f"Memory {req.memory_name} deleted"})
             except Exception as e:
                 emit("action_result", {"action": "delete_memory", "status": "error", "message": str(e)})
 
@@ -334,8 +404,10 @@ class SerenaDashboardAPI:
                         task.cancel()
                         emit("action_result", {"action": "cancel_task", "status": "success", "was_cancelled": True})
                         return
-                emit("action_result", {"action": "cancel_task", "status": "success", "was_cancelled": False,
-                     "message": f"Task {task_id} not found"})
+                emit(
+                    "action_result",
+                    {"action": "cancel_task", "status": "success", "was_cancelled": False, "message": f"Task {task_id} not found"},
+                )
             except Exception as e:
                 emit("action_result", {"action": "cancel_task", "status": "error", "message": str(e)})
 
@@ -355,8 +427,7 @@ class SerenaDashboardAPI:
                 req = RequestAddLanguage.model_validate(data)
                 self._add_language(req)
                 self.broadcast_full_state()
-                emit("action_result", {"action": "add_language", "status": "success",
-                     "message": f"Language {req.language} added"})
+                emit("action_result", {"action": "add_language", "status": "success", "message": f"Language {req.language} added"})
             except Exception as e:
                 emit("action_result", {"action": "add_language", "status": "error", "message": str(e)})
 
@@ -366,8 +437,7 @@ class SerenaDashboardAPI:
                 req = RequestRemoveLanguage.model_validate(data)
                 self._remove_language(req)
                 self.broadcast_full_state()
-                emit("action_result", {"action": "remove_language", "status": "success",
-                     "message": f"Language {req.language} removed"})
+                emit("action_result", {"action": "remove_language", "status": "success", "message": f"Language {req.language} removed"})
             except Exception as e:
                 emit("action_result", {"action": "remove_language", "status": "error", "message": str(e)})
 
@@ -404,10 +474,13 @@ class SerenaDashboardAPI:
                 executions = [QueuedExecution.from_task_info(t).model_dump() for t in current_tasks]
                 last = self._agent.get_last_executed_task()
                 last_execution = QueuedExecution.from_task_info(last).model_dump() if last else None
-                emit("execution_state", {
-                    "queued_executions": executions,
-                    "last_execution": last_execution,
-                })
+                emit(
+                    "execution_state",
+                    {
+                        "queued_executions": executions,
+                        "last_execution": last_execution,
+                    },
+                )
             except Exception:
                 log.debug("Failed to handle request_execution_state", exc_info=True)
 
@@ -424,6 +497,7 @@ class SerenaDashboardAPI:
 
     def _setup_routes(self) -> None:
         """HTTP routes — static files, heartbeat, and backward-compatible REST endpoints."""
+
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
@@ -620,11 +694,13 @@ class SerenaDashboardAPI:
 
         registered_projects: list[dict[str, str | bool]] = []
         for proj in self._agent.serena_config.projects:
-            registered_projects.append({
-                "name": proj.project_name,
-                "path": str(proj.project_root),
-                "is_active": proj.project_name == active_project_name,
-            })
+            registered_projects.append(
+                {
+                    "name": proj.project_name,
+                    "path": str(proj.project_root),
+                    "is_active": proj.project_name == active_project_name,
+                }
+            )
 
         all_tool_names = sorted([tool.get_name_from_cls() for tool in self._agent._all_tools.values()])
         available_tools: list[dict[str, str | bool]] = [
@@ -759,11 +835,13 @@ class SerenaDashboardAPI:
 
     def _add_language(self, request_add_language: RequestAddLanguage) -> None:
         from solidlsp.ls_config import Language
+
         language = Language(request_add_language.language)
         self._agent.add_language(language)
 
     def _remove_language(self, request_remove_language: RequestRemoveLanguage) -> None:
         from solidlsp.ls_config import Language
+
         language = Language(request_remove_language.language)
         self._agent.remove_language(language)
 
@@ -782,12 +860,13 @@ class SerenaDashboardAPI:
     def run(self, host: str, port: int) -> int:
         """Runs the dashboard via SocketIO (WebSocket-enabled)."""
         from flask import cli
+
         cli.show_server_banner = lambda *args, **kwargs: None
         self._socketio.run(self._app, host=host, port=port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
         return port
 
-    def run_in_thread(self, host: str) -> tuple[threading.Thread, int]:
-        port = self._find_first_free_port(0x5EDA, host)
+    def run_in_thread(self, host: str, start_port: int | None = None) -> tuple[threading.Thread, int]:
+        port = self._find_first_free_port(start_port if start_port is not None else resolve_dashboard_start_port(), host)
         log.info("Starting dashboard (listen_address=%s, port=%d)", host, port)
         thread = threading.Thread(target=lambda: self.run(host=host, port=port), daemon=True)
         thread.start()
